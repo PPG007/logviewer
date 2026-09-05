@@ -1,0 +1,247 @@
+/* 应用级样式：布局骨架 + 细节微调（antd 为 CSS-in-JS，无需额外引入）。
+   亮/暗由 <html data-theme> 驱动（见 main.tsx）：所有自写颜色经 CSS 变量，
+   暗色仅在 dark 块重定义变量；antd 组件配色由 ConfigProvider algorithm 负责。 */
+
+:root {
+  color-scheme: light;
+  --lv-text: rgba(0, 0, 0, 0.88); /* 裸文本（非 antd 组件）兜底色 */
+  --lv-border: rgba(5, 5, 5, 0.06);
+  --lv-side-bg: #ffffff;
+  --lv-hover: rgba(0, 0, 0, 0.04);
+  --lv-active: rgba(22, 119, 255, 0.1);
+  --lv-close: rgba(0, 0, 0, 0.45);
+  --lv-qb-bg: rgba(0, 0, 0, 0.015);
+  /* 级别整行淡色（亮色档） */
+  --lv-err: rgba(255, 77, 79, 0.05);
+  --lv-err-hover: rgba(255, 77, 79, 0.09);
+  --lv-warn: rgba(250, 173, 20, 0.1);
+  --lv-warn-hover: rgba(250, 173, 20, 0.15);
+  --lv-debug: rgba(22, 119, 255, 0.03);
+  --lv-debug-hover: rgba(22, 119, 255, 0.06);
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+  background: #000; /* overscroll 露底处不显白 */
+  --lv-text: rgba(255, 255, 255, 0.88);
+  --lv-border: rgba(255, 255, 255, 0.09);
+  --lv-side-bg: #141414;
+  --lv-hover: rgba(255, 255, 255, 0.08);
+  --lv-active: rgba(22, 119, 255, 0.25);
+  --lv-close: rgba(255, 255, 255, 0.5);
+  --lv-qb-bg: rgba(255, 255, 255, 0.02);
+  /* 级别整行淡色（暗色加深档，半透明仍不遮文字） */
+  --lv-err: rgba(255, 77, 79, 0.15);
+  --lv-err-hover: rgba(255, 77, 79, 0.25);
+  --lv-warn: rgba(250, 173, 20, 0.18);
+  --lv-warn-hover: rgba(250, 173, 20, 0.3);
+  --lv-debug: rgba(22, 119, 255, 0.08);
+  --lv-debug-hover: rgba(22, 119, 255, 0.16);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.right-scroll {
+  height: 100%;
+  min-width: 0;
+  overflow: auto;
+  color: var(--lv-text); /* 表格内裸 span 等继承，暗色可读 */
+}
+
+.main-center {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* ---- 左侧文件列表 ---- */
+
+.file-sidebar {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 6px;
+  box-sizing: border-box;
+  background: var(--lv-side-bg); /* 覆盖 Sider 底色，暗色下不受 Sider light 主题影响 */
+  color: var(--lv-text);
+}
+
+/* 顶部工具行：暗色切换 + 收起/展开（icon button） */
+.file-sidebar-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  padding-bottom: 6px;
+}
+
+/* 收起后 48px 窄栏：按钮改竖排居中（组件按 collapsed 状态切换 class） */
+.file-sidebar-tools-collapsed {
+  flex-direction: column;
+  align-items: center;
+  padding-bottom: 0;
+}
+
+.file-sidebar-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 6px 8px;
+}
+
+.file-sidebar-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.file-sidebar-empty {
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.file-item {
+  padding: 8px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  user-select: none;
+}
+
+.file-item:hover {
+  background: var(--lv-hover);
+}
+
+.file-item-active {
+  background: var(--lv-active);
+}
+
+.file-item-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.file-item-close {
+  visibility: hidden;
+  color: var(--lv-close);
+  padding: 4px;
+}
+
+.file-item:hover .file-item-close {
+  visibility: visible;
+}
+
+.file-item-close:hover {
+  color: #ff4d4f;
+}
+
+.file-item-meta {
+  padding-top: 2px;
+}
+
+.file-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  text-align: center;
+}
+
+/* ---- 查询构建区 ---- */
+
+.query-builder {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--lv-border);
+  background: var(--lv-qb-bg);
+}
+
+/* 卡片页签条：距右上角留白（top + left），导航条与正文间距 8px */
+.search-tabs.ant-tabs > .ant-tabs-nav {
+  margin: 10px 0 8px 12px;
+}
+
+/* 页签卡片：flex 布局，标签区撑满并居中、关闭按钮贴右缘（不再悬在卡片中部）；
+   min-width 保证卡片宽度足以容纳该布局。
+   （antd small 卡片规则有 4 个类，此处多一层结构类保证覆盖生效；
+     antd 默认 remove 为 margin-left 8px + margin-right -4px，一并覆盖掉） */
+.search-tabs.ant-tabs > .ant-tabs-nav .ant-tabs-nav-wrap .ant-tabs-tab {
+  display: flex;
+  align-items: center;
+  min-width: 64px;
+  padding-left: 10px;
+  padding-right: 4px;
+}
+
+.search-tabs.ant-tabs > .ant-tabs-nav .ant-tabs-nav-wrap .ant-tabs-tab .ant-tabs-tab-btn {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.search-tabs.ant-tabs > .ant-tabs-nav .ant-tabs-nav-wrap .ant-tabs-tab .ant-tabs-tab-remove {
+  margin-left: 8px;
+  margin-right: 0;
+}
+
+/* ---- 整行点击详情 Modal ---- */
+
+.lv-rows-clickable tbody tr.ant-table-row {
+  cursor: pointer;
+}
+
+/* 弹窗内容限高滚动；pre 排版：等宽小字 + 自动换行（超长 token 可断行） */
+.lv-json-modal .ant-modal-body {
+  max-height: 68vh;
+  overflow: auto;
+}
+
+.lv-json-pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--lv-text);
+}
+
+/* ---- 级别整行淡色（M8：便于扫读；hover 同色加深） ---- */
+
+.lv-row.lv-error > td {
+  background: var(--lv-err);
+}
+
+.lv-row.lv-error.ant-table-row:hover > td {
+  background: var(--lv-err-hover);
+}
+
+.lv-row.lv-warn > td {
+  background: var(--lv-warn);
+}
+
+.lv-row.lv-warn.ant-table-row:hover > td {
+  background: var(--lv-warn-hover);
+}
+
+.lv-row.lv-debug > td {
+  background: var(--lv-debug);
+}
+
+.lv-row.lv-debug.ant-table-row:hover > td {
+  background: var(--lv-debug-hover);
+}
