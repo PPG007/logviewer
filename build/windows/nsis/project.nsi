@@ -31,6 +31,17 @@ Unicode true
 ## !define REQUEST_EXECUTION_LEVEL "admin"            # Default "admin"  see also https://nsis.sourceforge.io/Docs/Chapter4.html
 ## !define WAILS_INSTALL_SCOPE     "user"             # Default "machine" - set to "user" for per-user install ($LOCALAPPDATA) without UAC prompt
 ####
+## Override template defaults with the real project info.
+## Defined before the include, so the generated wails_tools.nsh (!ifndef) keeps these values.
+## INFO_PRODUCTVERSION is intentionally NOT overridden here - it comes from the freshly
+## generated wails_tools.nsh on every build, avoiding version drift between two files.
+####
+!define INFO_PROJECTNAME    "logviewer"
+!define INFO_COMPANYNAME    "PPG007"
+!define INFO_PRODUCTNAME    "LogViewer"
+!define INFO_COPYRIGHT      "(c) 2026, PPG007"
+!define UNINST_KEY_NAME     "LogViewer"
+####
 ## Include the wails tools
 ####
 !include "wails_tools.nsh"
