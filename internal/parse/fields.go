@@ -14,15 +14,29 @@ type FieldInfo struct {
 }
 
 // 角色字段候选名（按优先级，与设计文档 §5.2 一致）。
+// 只列不带 @ 的基础名：@timestamp/@level/@message 等 "@" 前缀命名由 fieldValue 自动归一，
+// 无需逐个写进名单。
 var (
 	levelFieldNames = []string{"level", "severity", "lvl", "log_level"}
 	msgFieldNames   = []string{"msg", "message", "log", "content"}
 )
 
+// fieldValue 按候选名取值：命中"精确 key"，其次命中去掉 '@' 前缀的变体
+// （如 @level → level）。两者并存时精确 key 优先。无命中返回 ok=false。
+func fieldValue(m map[string]any, name string) (any, bool) {
+	if v, ok := m[name]; ok {
+		return v, true
+	}
+	if v, ok := m["@"+name]; ok {
+		return v, true
+	}
+	return nil, false
+}
+
 // DetectLevel 识别级别字段值并大写归一；无则返回 ""。
 func DetectLevel(m map[string]any) string {
 	for _, name := range levelFieldNames {
-		if v, ok := m[name]; ok {
+		if v, ok := fieldValue(m, name); ok {
 			if s, ok := v.(string); ok {
 				return strings.ToUpper(s)
 			}
@@ -34,7 +48,7 @@ func DetectLevel(m map[string]any) string {
 // DetectMessage 识别消息字段值（非字符串转字符串）；无则返回 ""。
 func DetectMessage(m map[string]any) string {
 	for _, name := range msgFieldNames {
-		if v, ok := m[name]; ok {
+		if v, ok := fieldValue(m, name); ok {
 			if s, ok := v.(string); ok {
 				return s
 			}

@@ -135,6 +135,7 @@ Tab {
 - **时间识别**：按优先级探测时间字段（`time` / `timestamp` / `ts` / `@timestamp` / `datetime` / `date`），解析多格式（RFC3339、epoch 秒/毫秒、常见自定义 layout）。识别失败则该行无时间，时间范围过滤时跳过。
 - **级别识别**：探测 `level` / `severity` / `lvl` / `log_level`，用于着色与默认列。
 - **消息字段识别**：探测 `msg` / `message` / `log` / `content`，作为默认「消息」列。
+- **`@` 前缀归一**：上述角色字段名若以 `@` 开头（Elasticsearch/Logstash 风格，如 `@timestamp` / `@level` / `@message`），识别时自动剥离 `@` 后按候选名匹配，无需逐一枚举；同名基础字段与 `@` 变体并存时基础字段优先。
 - **字段探测**：收集所有顶层字段名 + 类型，供检索条件下拉选择（采样策略见 §11 决策 5）。
 
 ### 5.3 展示

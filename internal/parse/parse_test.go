@@ -85,6 +85,10 @@ func TestExtractTimestamp(t *testing.T) {
 		// 字段优先级与缺省
 		{"timestamp 优先", `{"ts":1,"timestamp":1720000000}`, ptr(int64(1720000000000))},
 		{"@timestamp", `{"@timestamp":"2024-07-01T10:00:00.000Z"}`, ptr(int64(1719828000000))},
+		{"@ts 变体", `{"@ts":1720000000}`, ptr(int64(1720000000000))},
+		{"@datetime 变体", `{"@datetime":"2024-07-01T10:00:00.000Z"}`, ptr(int64(1719828000000))},
+		{"基础名优先于 @ 变体", `{"@timestamp":"2024-07-01T00:00:00.000Z","timestamp":1720000000}`, ptr(int64(1720000000000))},
+		{"只有 @ 开头非时间字段", `{"@ts2":1720000000}`, nil},
 		{"datetime", `{"datetime":"2024-07-01T10:00:00.000Z"}`, ptr(int64(1719828000000))},
 		{"date 字段", `{"date":"2024-07-01T10:00:00.000Z"}`, ptr(int64(1719828000000))},
 		{"无时间字段", `{"a":1}`, nil},
@@ -132,6 +136,12 @@ func TestDetectLevel(t *testing.T) {
 		{`{"log_level":"trace"}`, "TRACE"},
 		{`{"msg":"no level here"}`, ""},
 		{`{"level":42}`, ""}, // 数值不作为级别
+		// @ 前缀变体（fieldValue 归一）
+		{`{"@level":"error"}`, "ERROR"},
+		{`{"@severity":"info"}`, "INFO"},
+		{`{"@log_level":"trace"}`, "TRACE"},
+		{`{"level":"debug","@level":"warn"}`, "DEBUG"}, // 基础名优先于 @ 变体
+		{`{"@msg":"no level here"}`, ""},
 	}
 	for _, c := range cases {
 		if got := DetectLevel(mustMap(t, c.raw)); got != c.want {
@@ -154,6 +164,11 @@ func TestDetectMessage(t *testing.T) {
 		{`{"msg":true}`, "true"},
 		{`{"a":"b"}`, ""},
 		{`{"msg":{"nested":1}}`, "map[nested:1]"}, // 对象消息格式化为文本
+		// @ 前缀变体（fieldValue 归一）
+		{`{"@message":"world"}`, "world"},
+		{`{"@msg":42}`, "42"},                   // @ 变体非字符串也格式化
+		{`{"message":"a","@message":"b"}`, "a"}, // 基础名优先于 @ 变体
+		{`{"@a":"b","@log":"log body"}`, "log body"},
 	}
 	for _, c := range cases {
 		if got := DetectMessage(mustMap(t, c.raw)); got != c.want {

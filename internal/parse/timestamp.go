@@ -8,7 +8,8 @@ import (
 )
 
 // timeFieldNames 时间字段候选（按优先级探测）。
-var timeFieldNames = []string{"time", "timestamp", "ts", "@timestamp", "datetime", "date"}
+// 只列不带 @ 的基础名：@timestamp 等 "@" 前缀变体由 fieldValue 自动归一为对应基础名。
+var timeFieldNames = []string{"time", "timestamp", "ts", "datetime", "date"}
 
 // timeLayouts 常见文本时间布局。
 // 注意：无时区布局（如 "2006-01-02 15:04:05"）按 time.Local 解析，
@@ -27,7 +28,7 @@ var timeLayouts = []string{
 // ExtractTimestamp 按优先级探测时间字段并解析，返回 unix 毫秒；无/解析失败返回 nil。
 func ExtractTimestamp(m map[string]any) *int64 {
 	for _, name := range timeFieldNames {
-		if v, ok := m[name]; ok {
+		if v, ok := fieldValue(m, name); ok {
 			if ms := toMillis(v); ms != nil {
 				return ms
 			}
