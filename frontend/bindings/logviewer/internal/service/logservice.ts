@@ -24,6 +24,13 @@ export function CancelSearch(fileID: string, tabID: string): $CancellablePromise
 }
 
 /**
+ * ClearRecentFiles 清空全部历史记录。
+ */
+export function ClearRecentFiles(): $CancellablePromise<void> {
+    return $Call.ByID(671551859);
+}
+
+/**
  * CloseFile 关闭文件，取消其所有检索并释放索引与结果缓存；
  * 临时日志的临时文件一并删除。
  */
@@ -77,7 +84,15 @@ export function GetPage(fileID: string, tabID: string, page: number, pageSize: n
 }
 
 /**
- * OpenFile 打开指定路径文件（展示名 = 文件名）。
+ * ListRecentFiles 返回历史文件记录（最近打开在前），并探测文件在磁盘上是否仍存在。
+ */
+export function ListRecentFiles(): $CancellablePromise<$models.RecentFile[] | null> {
+    return $Call.ByID(4045825588);
+}
+
+/**
+ * OpenFile 打开指定路径文件（展示名 = 文件名）。同一路径已打开时复用现有会话，
+ * 避免重复占用索引内存；同名但不同目录的文件是两个独立会话。
  */
 export function OpenFile(path: string): $CancellablePromise<$models.FileInfo> {
     return $Call.ByID(4260092432, path);
@@ -91,11 +106,26 @@ export function OpenFileDialog(): $CancellablePromise<$models.FileInfo> {
 }
 
 /**
+ * OpenRecentFile 打开历史记录中的文件；文件已不在磁盘时返回明确错误，
+ * 前端据此提示「文件不存在」并给出移除记录的选项。
+ */
+export function OpenRecentFile(id: number): $CancellablePromise<$models.FileInfo> {
+    return $Call.ByID(2536471051, id);
+}
+
+/**
  * OpenTempLog 创建临时日志：内容写入系统临时目录后走与普通文件一致的解析/索引流程。
  * 上限：50,000 行 / 10 MiB（前端预检同口径，此处为准）。
  */
 export function OpenTempLog(content: string): $CancellablePromise<$models.FileInfo> {
     return $Call.ByID(2653523862, content);
+}
+
+/**
+ * RemoveRecentFile 从历史记录中移除一条（关闭文件不删记录，用户显式移除才删）。
+ */
+export function RemoveRecentFile(id: number): $CancellablePromise<void> {
+    return $Call.ByID(185044095, id);
 }
 
 /**

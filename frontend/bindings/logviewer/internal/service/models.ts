@@ -32,6 +32,12 @@ export interface IndexProgressEvent {
      * 索引失败信息（成功为空）
      */
     "Error": string;
+
+    /**
+     * TotalLines 索引完成后的总行数（未完成时为 0）。行数只有在索引扫描结束后才可知，
+     * 打开接口返回的 FileInfo.TotalLines 恒为 0，前端以此事件/GetIndexStatus 补正。
+     */
+    "TotalLines": number;
 }
 
 export interface IndexStatus {
@@ -43,6 +49,12 @@ export interface IndexStatus {
      */
     "Percent": number;
     "Error": string;
+
+    /**
+     * TotalLines 索引完成后的总行数（未完成时为 0）。供前端对账兜底：
+     * 事件可能早于订阅就绪，行数靠这里补齐（FileInfo 是打开瞬间的快照，行数恒为 0）。
+     */
+    "TotalLines": number;
 }
 
 export interface PageResult {
@@ -66,6 +78,32 @@ export interface ParsedLine {
     "Timestamp": number | null;
     "Level": string;
     "Message": string;
+}
+
+/**
+ * RecentFile 历史记录项（侧栏「最近打开」列表）。同名不同路径的文件靠 Path/Dir 区分。
+ */
+export interface RecentFile {
+    "ID": number;
+    "Path": string;
+    "Name": string;
+    "Dir": string;
+
+    /**
+     * 最近一次索引完成后的行数（未知为 0）
+     */
+    "TotalLines": number;
+    "OpenCount": number;
+
+    /**
+     * unix 毫秒
+     */
+    "LastOpenedAt": number;
+
+    /**
+     * 记录读取时磁盘上是否仍存在；false = 已丢失，UI 标记并可移除记录
+     */
+    "Exists": boolean;
 }
 
 export interface SearchProgressEvent {

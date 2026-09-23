@@ -4,7 +4,7 @@
 // 一切 UI 状态从这里读写；数据加载动作以模块函数形式导出，组件只关心 promise 成败。
 
 import { create } from 'zustand'
-import type { FieldInfo, FieldValues, FileInfo, ParsedLine, Query } from '../types'
+import type { FieldInfo, FieldValues, FileInfo, ParsedLine, Query, RecentFile } from '../types'
 import { api } from '../api'
 
 /** 每页行数：默认 20，选择器范围 10~100（后端再兜底 [1,500]）。 */
@@ -88,12 +88,21 @@ export function newSearchTab(seed: Query | null, over?: Partial<Tab>): Tab {
 interface State {
   files: FileView[]
   activeFileId: string | null
+  /** 历史记录（SQLite 持久化，重启后仍在）：侧栏「最近打开」数据源。 */
+  recent: RecentFile[]
   dark: boolean // 暗色主题（持久化；同步 ConfigProvider 与 <html data-theme>）
   toggleTheme: () => void
   addFile: (info: FileInfo) => void
   removeFile: (fileId: string) => void
   setActiveFile: (fileId: string) => void
-  setIndexProgress: (fileId: string, percent: number, done: boolean, error?: string) => void
+  setRecent: (recent: RecentFile[]) => void
+  setIndexProgress: (
+    fileId: string,
+    percent: number,
+    done: boolean,
+    error?: string,
+    totalLines?: number,
+  ) => void
   setFields: (fileId: string, fields: FieldInfo[]) => void
   setFieldValues: (fileId: string, field: string, fv: FieldValues) => void
   /** 复制当前激活 tab 的条件到新 tab 并立即执行检索（+ 按钮）。 */
@@ -114,6 +123,7 @@ export function findTab(file: FileView | null, tabId: string): Tab | null {
 export const useStore = create<State>()((set, get) => ({
   files: [],
   activeFileId: null,
+  recent: [],
   dark: readSavedTheme(),
 
   toggleTheme() {
@@ -127,7 +137,12 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   addFile(info) {
-    if (findFile(get(), info.ID)) return // 重复 ID（同一次打开的二次调用）
+    const existing = findFile(get(), info.ID)
+    if (existing) {
+      // 同一路径后端复用会话：这里只切到该文件（不重复加入列表）
+      set({ activeFileId: info.ID })
+      return
+    }
     const first = newSearchTab(emptyQuery(), { autoRun: true }) // 首 tab = 全部（空条件）
     const view: FileView = {
       fileId: info.ID,
@@ -144,6 +159,7 @@ export const useStore = create<State>()((set, get) => ({
       files: [...s.files, view],
       activeFileId: s.activeFileId ?? info.ID,
     }))
+    refreshRecent().catch(() => {}) // 后端已在打开时写入记录，这里同步「最近打开」
   },
 
   removeFile(fileId) {
@@ -159,6 +175,7 @@ export const useStore = create<State>()((set, get) => ({
         activeFileId: s.activeFileId === fileId ? (files[0]?.fileId ?? null) : s.activeFileId,
       }
     })
+    refreshRecent().catch(() => {}) // 关闭不删记录：该文件应出现在「最近打开」里
   },
 
   setActiveFile(fileId) {
@@ -166,7 +183,11 @@ export const useStore = create<State>()((set, get) => ({
     set({ activeFileId: fileId })
   },
 
-  setIndexProgress(fileId, percent, done, error = '') {
+  setRecent(recent) {
+    set({ recent })
+  },
+
+  setIndexProgress(fileId, percent, done, error = '', totalLines) {
     set((s) => ({
       files: s.files.map((f) =>
         f.fileId !== fileId
@@ -176,7 +197,15 @@ export const useStore = create<State>()((set, get) => ({
               indexPercent: done && !error ? 100 : percent,
               indexDone: done,
               indexError: error,
-              info: done ? { ...f.info, Status: error ? 'error' : 'ready' } : f.info,
+              // 行数只有在索引扫描结束后才可知：打开接口返回的 FileInfo.TotalLines 恒为 0，
+              // 这里在完成时补正（否则侧栏一直显示「0 行」）。
+              info: done
+                ? {
+                    ...f.info,
+                    Status: error ? 'error' : 'ready',
+                    TotalLines: totalLines && totalLines > 0 ? totalLines : f.info.TotalLines,
+                  }
+                : f.info,
             },
       ),
     }))
@@ -438,7 +467,39 @@ export async function syncIndex(fileId: string): Promise<void> {
   const cur = useStore.getState()
   if (!findFile(cur, fileId)) return // 已在此前被关闭
   if (st.Done) {
-    cur.setIndexProgress(fileId, st.Error ? 0 : 100, true, st.Error)
+    cur.setIndexProgress(fileId, st.Error ? 0 : 100, true, st.Error, st.TotalLines)
     if (!st.Error) ensureFields(fileId)
   }
+}
+
+// ---------------- 历史记录（SQLite 持久化） ----------------
+// 记录由后端在打开文件时写入；这里只负责把列表同步到 store 与「重新打开」动作。
+
+/** 拉取历史记录并写入 store；失败（数据库不可用等）静默为空列表，不影响主流程。 */
+export async function refreshRecent(): Promise<void> {
+  try {
+    useStore.getState().setRecent(await api.listRecentFiles())
+  } catch {
+    useStore.getState().setRecent([])
+  }
+}
+
+/** 从历史记录重新打开文件（重建索引）；文件已丢失时抛出（调用方提示并可移除记录）。 */
+export async function openRecentFile(id: number): Promise<void> {
+  const info = await api.openRecentFile(id)
+  useStore.getState().addFile(info) // 同一路径已打开时只切过去
+  await syncIndex(info.ID).catch(() => {}) // 事件推送为主，此调用兜底对账
+  await refreshRecent() // 打开次数/最近打开时间有变化
+}
+
+/** 从历史记录中移除一条（例如磁盘上已丢失的文件）。 */
+export async function removeRecentFile(id: number): Promise<void> {
+  await api.removeRecentFile(id)
+  await refreshRecent()
+}
+
+/** 清空全部历史记录。 */
+export async function clearRecentFiles(): Promise<void> {
+  await api.clearRecentFiles()
+  useStore.getState().setRecent([])
 }

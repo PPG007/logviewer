@@ -13,7 +13,8 @@ export function installEvents(): void {
   Events.On('indexProgress', (e: any) => {
     const p = (e?.data ?? e) as IndexProgressEvent
     if (!p || typeof p.FileID !== 'string' || !p.FileID) return
-    useStore.getState().setIndexProgress(p.FileID, p.Percent, p.Done, p.Error ?? '')
+    // 完成事件带总行数：打开接口的 FileInfo.TotalLines 恒为 0（索引异步），行数在这里补正
+    useStore.getState().setIndexProgress(p.FileID, p.Percent, p.Done, p.Error ?? '', p.TotalLines ?? 0)
     if (p.Done && !p.Error) ensureFields(p.FileID)
   })
 

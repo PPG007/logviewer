@@ -14,6 +14,21 @@ export interface IndexStatus {
   Done: boolean
   Percent: number // 0~100
   Error: string
+  /** 索引完成后的总行数（未完成 0）；FileInfo 是打开瞬间的快照，行数靠这里补正。 */
+  TotalLines: number
+}
+
+/** 历史记录项（侧栏「最近打开」）：同名不同路径靠 Path/Dir 区分。 */
+export interface RecentFile {
+  ID: number
+  Path: string
+  Name: string
+  Dir: string
+  TotalLines: number // 最近一次索引完成后的行数（未知 0）
+  OpenCount: number
+  LastOpenedAt: number // unix 毫秒
+  /** 读取记录时磁盘上是否仍存在；false = 已丢失，UI 标记并提供移除记录。 */
+  Exists: boolean
 }
 
 export interface ParsedLine {
@@ -73,6 +88,7 @@ export interface IndexProgressEvent {
   Percent: number
   Done: boolean
   Error: string // 索引失败信息（成功为空）
+  TotalLines: number // 完成时的总行数（未完成 0）
 }
 
 export interface SearchProgressEvent {

@@ -46,15 +46,19 @@ body,
   margin: 0;
 }
 
-.right-scroll {
+/* 右侧主区：整列定高 flex，页面本身不滚动；
+   滚动只发生在表格区（.lv-table-area）内，页签/查询条件/导出/分页器因此固定不动。 */
+.right-pane {
   height: 100%;
   min-width: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   color: var(--lv-text); /* 表格内裸 span 等继承，暗色可读 */
 }
 
 .main-center {
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -155,6 +159,49 @@ body,
   padding-top: 2px;
 }
 
+/* 目录行：区分同名但不同路径的文件（超长省略，hover 提示完整路径） */
+.file-item-dir {
+  font-size: 11px;
+  color: var(--lv-close);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+/* ---- 最近打开（SQLite 持久化） ---- */
+
+.file-sidebar-recent {
+  flex: none;
+  max-height: 45%;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--lv-border);
+}
+
+.file-sidebar-recent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 4px;
+}
+
+.file-sidebar-recent-clear {
+  color: var(--lv-close);
+  padding: 2px;
+}
+
+.file-sidebar-recent-clear:hover {
+  color: #ff4d4f;
+}
+
+/* 历史项：整体略暗，与「已打开」区分 */
+.file-item-recent .file-item-name {
+  color: var(--lv-text);
+  opacity: 0.85;
+}
+
 .file-sidebar-footer {
   display: flex;
   flex-direction: column;
@@ -163,17 +210,80 @@ body,
   text-align: center;
 }
 
+/* ---- 页签（固定在顶部，不随表格滚动） ---- */
+
+/* Tabs 整体撑满右侧主区：导航条固定高度，正文占满剩余高度 */
+.search-tabs.ant-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.search-tabs.ant-tabs > .ant-tabs-body-holder,
+.search-tabs.ant-tabs > .ant-tabs-body-holder > .ant-tabs-body,
+.search-tabs.ant-tabs .ant-tabs-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 卡片页签条：距右上角留白（top + left），导航条与正文间距 8px */
+.search-tabs.ant-tabs > .ant-tabs-nav {
+  flex: none;
+  margin: 10px 0 8px 12px;
+}
+
+/* 单个页签内容：查询条件（固定）+ 导出按钮（固定）+ 表格区（占满剩余并自滚） */
+.tab-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ---- 查询构建区 ---- */
 
 .query-builder {
+  flex: none;
   padding: 8px 12px;
   border-bottom: 1px solid var(--lv-border);
   background: var(--lv-qb-bg);
 }
 
-/* 卡片页签条：距右上角留白（top + left），导航条与正文间距 8px */
-.search-tabs.ant-tabs > .ant-tabs-nav {
-  margin: 10px 0 8px 12px;
+/* 导出按钮行：固定高度，右对齐 */
+.tab-actions {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px 2px;
+}
+
+/* ---- 表格区（右侧唯一滚动容器） ---- */
+
+.lv-table-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 表头吸顶：滚动表体时列名始终可见（sticky 相对 .lv-table-area 定位） */
+.lv-table-area .ant-table-thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* 分页器：独立于滚动区，固定在面板底部 */
+.lv-pager {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 8px 12px;
+  border-top: 1px solid var(--lv-border);
+  background: var(--lv-side-bg);
 }
 
 /* 页签卡片：flex 布局，标签区撑满并居中、关闭按钮贴右缘（不再悬在卡片中部）；

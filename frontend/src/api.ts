@@ -9,6 +9,7 @@ import type {
   IndexStatus,
   PageResult,
   Query,
+  RecentFile,
   SearchResult,
 } from './types'
 
@@ -69,5 +70,22 @@ export const api = {
   async exportMatches(fileId: string, tabId: string): Promise<string | null> {
     const p = (await svc.ExportMatches(fileId, tabId)) as string
     return p || null
+  },
+
+  // ---------------- 历史记录（持久化，重启后可见） ----------------
+
+  /** 历史文件记录（最近打开在前，含磁盘存在性探测）；数据库不可用时抛错。 */
+  async listRecentFiles(): Promise<RecentFile[]> {
+    return ((await svc.ListRecentFiles()) ?? []) as RecentFile[]
+  },
+  /** 打开历史记录中的文件（重新建索引）；文件已丢失时抛错。 */
+  async openRecentFile(id: number): Promise<FileInfo> {
+    return (await svc.OpenRecentFile(id)) as FileInfo
+  },
+  async removeRecentFile(id: number): Promise<void> {
+    await svc.RemoveRecentFile(id)
+  },
+  async clearRecentFiles(): Promise<void> {
+    await svc.ClearRecentFiles()
   },
 }

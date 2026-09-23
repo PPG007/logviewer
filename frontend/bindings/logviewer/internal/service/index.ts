@@ -13,6 +13,7 @@ export type {
     IndexStatus,
     PageResult,
     ParsedLine,
+    RecentFile,
     SearchProgressEvent,
     SearchResult
 } from "./models.js";

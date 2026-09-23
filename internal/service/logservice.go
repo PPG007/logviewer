@@ -4,12 +4,16 @@ package service
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -17,6 +21,7 @@ import (
 	"logviewer/internal/logfile"
 	"logviewer/internal/parse"
 	"logviewer/internal/search"
+	"logviewer/internal/store"
 )
 
 // ---------------- DTO（会被 bindings 生成器转成 TS 类型） ----------------
@@ -34,6 +39,21 @@ type IndexStatus struct {
 	Done    bool
 	Percent float64 // 0~100
 	Error   string
+	// TotalLines 索引完成后的总行数（未完成时为 0）。供前端对账兜底：
+	// 事件可能早于订阅就绪，行数靠这里补齐（FileInfo 是打开瞬间的快照，行数恒为 0）。
+	TotalLines int64
+}
+
+// RecentFile 历史记录项（侧栏「最近打开」列表）。同名不同路径的文件靠 Path/Dir 区分。
+type RecentFile struct {
+	ID           uint
+	Path         string
+	Name         string
+	Dir          string
+	TotalLines   int64 // 最近一次索引完成后的行数（未知为 0）
+	OpenCount    int
+	LastOpenedAt int64 // unix 毫秒
+	Exists       bool  // 记录读取时磁盘上是否仍存在；false = 已丢失，UI 标记并可移除记录
 }
 
 // FieldValues 某字段探测到的取值枚举（供检索条件下拉，仅 string 类型字段有）。
@@ -72,6 +92,9 @@ type IndexProgressEvent struct {
 	Percent float64
 	Done    bool
 	Error   string // 索引失败信息（成功为空）
+	// TotalLines 索引完成后的总行数（未完成时为 0）。行数只有在索引扫描结束后才可知，
+	// 打开接口返回的 FileInfo.TotalLines 恒为 0，前端以此事件/GetIndexStatus 补正。
+	TotalLines int64
 }
 
 type SearchProgressEvent struct {
@@ -170,10 +193,14 @@ type LogService struct {
 	fileTabs    map[string]map[string]struct{}  // fileID -> 该文件注册过的 tabID（CloseFile 时清理）
 	tempFiles   map[string]string               // fileID -> 临时日志文件路径（关闭时删除）
 	engine      *search.Engine
+
+	// store 历史文件记录库（SQLite）。打开失败时为 nil，功能整体降级为「无历史记录」，
+	// 不影响打开/检索等主流程。
+	store *store.Store
 }
 
 func NewLogService() *LogService {
-	return &LogService{
+	s := &LogService{
 		sessions:    make(map[string]*logfile.FileSession),
 		fields:      make(map[string]map[string]string),
 		fieldValues: make(map[string]map[string]*valSet),
@@ -181,6 +208,22 @@ func NewLogService() *LogService {
 		tempFiles:   make(map[string]string),
 		engine:      search.NewEngine(),
 	}
+	if path, err := store.DefaultPath(); err != nil {
+		log.Printf("历史记录不可用（无法确定数据库路径）：%v", err)
+	} else if db, err := store.Open(path); err != nil {
+		log.Printf("历史记录不可用（打开数据库失败）：%v", err)
+	} else {
+		s.store = db
+	}
+	return s
+}
+
+// ServiceShutdown 由 Wails 在退出时调用：关闭数据库连接（记录已逐条提交，此处仅释放句柄）。
+func (s *LogService) ServiceShutdown() error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.Close()
 }
 
 // emit 发送事件；application.Get() 为 nil（如单元测试）时静默跳过。
@@ -221,8 +264,8 @@ func (s *LogService) OpenFileDialog() (FileInfo, error) {
 
 // openSession 打开日志路径并注册会话：同一次顺序扫描里完成索引、字段收集与
 // 取值收集（枚举下拉数据），立即返回。displayName 非空时覆盖展示名
-// （临时日志显示为「临时日志 …」）。
-func (s *LogService) openSession(path, displayName string) (FileInfo, error) {
+// （临时日志显示为「临时日志 …」）；persist=false 表示临时日志，不进历史记录。
+func (s *LogService) openSession(path, displayName string, persist bool) (FileInfo, error) {
 	acc := make(map[string]string)
 	vals := make(map[string]*valSet)
 	onLine := func(_ int64, raw string) {
@@ -255,14 +298,78 @@ func (s *LogService) openSession(path, displayName string) (FileInfo, error) {
 	s.fields[sess.ID] = acc
 	s.fieldValues[sess.ID] = vals
 	s.mu.Unlock()
+	if persist {
+		// 记录文件名/路径/大小/修改时间等：重启后可在「最近打开」里找到（同名不同路径各记一条）。
+		s.recordOpen(sess)
+		s.recordTotalLines(sess)
+	}
 	// 进度通过心跳事件推送（fileID 此时才可用，避免回调闭包时序问题）。
 	s.watchIndex(sess.ID, sess)
 	return info, nil
 }
 
-// OpenFile 打开指定路径文件（展示名 = 文件名）。
+// OpenFile 打开指定路径文件（展示名 = 文件名）。同一路径已打开时复用现有会话，
+// 避免重复占用索引内存；同名但不同目录的文件是两个独立会话。
 func (s *LogService) OpenFile(path string) (FileInfo, error) {
-	return s.openSession(path, "")
+	if info, ok := s.findOpenByPath(path); ok {
+		// 复用会话也算一次打开：刷新打开次数与「最近打开」时间。
+		if sess := s.get(info.ID); sess != nil {
+			s.recordOpen(sess)
+		}
+		return info, nil
+	}
+	return s.openSession(path, "", true)
+}
+
+// recordOpen 写一条历史记录（打开次数 +1、刷新最近打开时间）。失败只记日志，
+// 不影响打开主流程；store 不可用（数据库打开失败）时整体降级为空操作。
+func (s *LogService) recordOpen(sess *logfile.FileSession) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.Touch(sess.Path, sess.Size(), sess.ModTime().Unix()); err != nil {
+		log.Printf("写入历史记录失败：%v", err)
+	}
+}
+
+// recordTotalLines 等索引结束后把总行数回写历史记录（行数只有索引完成时才可知）。
+func (s *LogService) recordTotalLines(sess *logfile.FileSession) {
+	if s.store == nil {
+		return
+	}
+	go func() {
+		if err := sess.WaitReady(); err != nil {
+			return // 索引失败：不写行数
+		}
+		if err := s.store.SetTotalLines(sess.Path, sess.TotalLines()); err != nil {
+			log.Printf("写入历史记录行数失败：%v", err)
+		}
+	}()
+}
+
+// findOpenByPath 按归一化路径查找已打开的会话（Windows 下忽略大小写）。
+func (s *LogService) findOpenByPath(path string) (FileInfo, bool) {
+	key, err := pathKey(path)
+	if err != nil {
+		return FileInfo{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if k, err := pathKey(sess.Path); err == nil && k == key {
+			return toFileInfo(sess), true
+		}
+	}
+	return FileInfo{}, false
+}
+
+// pathKey 归一化路径（绝对路径 + 平台大小写规则），用于同一文件的判定。
+func pathKey(path string) (string, error) {
+	abs, err := store.Normalize(path)
+	if err != nil {
+		return "", err
+	}
+	return store.PathKey(abs), nil
 }
 
 // OpenTempLog 创建临时日志：内容写入系统临时目录后走与普通文件一致的解析/索引流程。
@@ -291,7 +398,7 @@ func (s *LogService) OpenTempLog(content string) (FileInfo, error) {
 		os.Remove(path)
 		return FileInfo{}, fmt.Errorf("写入临时文件失败：%w", err)
 	}
-	info, err := s.openSession(path, fmt.Sprintf("临时日志 %s", time.Now().Format("15:04:05")))
+	info, err := s.openSession(path, fmt.Sprintf("临时日志 %s", time.Now().Format("15:04:05")), false)
 	if err != nil {
 		os.Remove(path) // 打开失败不留垃圾文件
 		return FileInfo{}, err
@@ -303,6 +410,7 @@ func (s *LogService) OpenTempLog(content string) (FileInfo, error) {
 }
 
 // watchIndex 轮询会话状态并以 indexProgress 事件推送进度，直到 ready/error。
+// 索引完成时才拿得到总行数，故随完成事件一并推送（前端据此补正行数显示）。
 func (s *LogService) watchIndex(fileID string, sess *logfile.FileSession) {
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
@@ -312,7 +420,7 @@ func (s *LogService) watchIndex(fileID string, sess *logfile.FileSession) {
 			case logfile.StatusIndexing:
 				emit("indexProgress", IndexProgressEvent{FileID: fileID, Percent: sess.Percent(), Done: false})
 			case logfile.StatusReady:
-				emit("indexProgress", IndexProgressEvent{FileID: fileID, Percent: 100, Done: true})
+				emit("indexProgress", IndexProgressEvent{FileID: fileID, Percent: 100, Done: true, TotalLines: sess.TotalLines()})
 				return
 			default:
 				errMsg := ""
@@ -359,13 +467,124 @@ func (s *LogService) get(fileID string) *logfile.FileSession {
 	return s.sessions[fileID]
 }
 
+// ---------------- 历史记录（「最近打开」） ----------------
+
+// errNoHistory 历史记录不可用（数据库打开失败）时统一返回的错误。
+func errNoHistory() error {
+	return fmt.Errorf("历史记录不可用（数据库未能初始化）")
+}
+
+// ListRecentFiles 返回历史文件记录（最近打开在前），并探测文件在磁盘上是否仍存在。
+func (s *LogService) ListRecentFiles() ([]RecentFile, error) {
+	if s.store == nil {
+		return nil, errNoHistory()
+	}
+	recs, err := s.store.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RecentFile, 0, len(recs))
+	paths := make([]string, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, RecentFile{
+			ID:           r.ID,
+			Path:         r.Path,
+			Name:         r.Name,
+			Dir:          r.Dir,
+			TotalLines:   r.TotalLines,
+			OpenCount:    r.OpenCount,
+			LastOpenedAt: r.LastOpenedAt.UnixMilli(),
+			Exists:       true, // 先按「存在」乐观置位，探测超时/失败不误报已丢失
+		})
+		paths = append(paths, r.Path)
+	}
+	for i, missing := range probeExists(paths) {
+		out[i].Exists = !missing
+	}
+	return out, nil
+}
+
+// OpenRecentFile 打开历史记录中的文件；文件已不在磁盘时返回明确错误，
+// 前端据此提示「文件不存在」并给出移除记录的选项。
+func (s *LogService) OpenRecentFile(id uint) (FileInfo, error) {
+	if s.store == nil {
+		return FileInfo{}, errNoHistory()
+	}
+	rec, err := s.store.Get(id)
+	if err != nil {
+		return FileInfo{}, fmt.Errorf("历史记录不存在：%w", err)
+	}
+	if _, err := os.Stat(rec.Path); err != nil {
+		if missingFile(err) {
+			return FileInfo{}, fmt.Errorf("文件不存在：%s", rec.Path)
+		}
+		return FileInfo{}, fmt.Errorf("无法访问文件：%s（%v）", rec.Path, err)
+	}
+	return s.OpenFile(rec.Path)
+}
+
+// RemoveRecentFile 从历史记录中移除一条（关闭文件不删记录，用户显式移除才删）。
+func (s *LogService) RemoveRecentFile(id uint) error {
+	if s.store == nil {
+		return errNoHistory()
+	}
+	return s.store.Delete(id)
+}
+
+// ClearRecentFiles 清空全部历史记录。
+func (s *LogService) ClearRecentFiles() error {
+	if s.store == nil {
+		return errNoHistory()
+	}
+	return s.store.Clear()
+}
+
+// existenceWait 存在性探测的整体等待上限：网络路径不可达时 os.Stat 可能阻塞数十秒，
+// 超时未返回的记录按「存在」处理（打开时仍会给出准确错误），避免侧栏整体卡住。
+const existenceWait = 1500 * time.Millisecond
+
+// probeExists 并发探测各路径是否已不在磁盘上，返回与 paths 等长的 missing 标志。
+// 结果经缓冲 channel 回收：超时后仍在跑的 goroutine 写满缓冲即退出，不泄漏也不会与调用方竞争。
+func probeExists(paths []string) []bool {
+	missing := make([]bool, len(paths))
+	if len(paths) == 0 {
+		return missing
+	}
+	type result struct {
+		idx     int
+		missing bool
+	}
+	ch := make(chan result, len(paths))
+	for i, p := range paths {
+		go func(i int, p string) {
+			_, err := os.Stat(p)
+			ch <- result{idx: i, missing: missingFile(err)}
+		}(i, p)
+	}
+	timeout := time.After(existenceWait)
+	for range paths {
+		select {
+		case r := <-ch:
+			missing[r.idx] = r.missing
+		case <-timeout:
+			return missing
+		}
+	}
+	return missing
+}
+
+// missingFile 判断 Stat 错误是否为「文件不存在」（含路径中间层不是目录的情形）。
+func missingFile(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
 // GetIndexStatus 查询索引进度（供前端打开文件后对账，事件为主、此方法兜底）。
 func (s *LogService) GetIndexStatus(fileID string) (IndexStatus, error) {
 	sess := s.get(fileID)
 	if sess == nil {
 		return IndexStatus{}, fmt.Errorf("file not found: %s", fileID)
 	}
-	st := IndexStatus{FileID: fileID, Percent: sess.Percent()}
+	st := IndexStatus{FileID: fileID, Percent: sess.Percent(), TotalLines: sess.TotalLines()}
 	switch sess.Status() {
 	case logfile.StatusReady:
 		st.Done = true

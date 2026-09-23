@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Status 会话状态。
@@ -49,7 +50,8 @@ type FileSession struct {
 	Name string // 文件名（filepath.Base）
 
 	f        *os.File
-	fileSize int64 // 打开时的文件字节数（「打开时刻快照」语义）
+	fileSize int64     // 打开时的文件字节数（「打开时刻快照」语义）
+	modTime  time.Time // 打开时的文件修改时间（历史记录展示用）
 
 	mu         sync.RWMutex
 	totalLines int64
@@ -86,6 +88,7 @@ func Open(path string, onLine LineFunc) (*FileSession, error) {
 		Name:     filepath.Base(path),
 		f:        f,
 		fileSize: fi.Size(),
+		modTime:  fi.ModTime(),
 		status:   StatusIndexing,
 		done:     make(chan struct{}),
 	}
@@ -152,6 +155,20 @@ func (s *FileSession) setDoneBytes(b int64) {
 	s.mu.Lock()
 	s.doneBytes = b
 	s.mu.Unlock()
+}
+
+// Size 打开时刻的文件字节数（快照语义，不随文件后续追加变化）。
+func (s *FileSession) Size() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.fileSize
+}
+
+// ModTime 打开时刻的文件修改时间。
+func (s *FileSession) ModTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modTime
 }
 
 // TotalLines 总行数（索引完成前为 0）。

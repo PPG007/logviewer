@@ -92,11 +92,12 @@ function FilePane({ fileId }: { fileId: string }) {
     ),
     // 每个文件至少保留一个 tab；关闭由 removeTab 内部兜底
     closable: file.tabs.length > 1,
+    // 固定区（查询条件/导出）在上，表格区自占剩余高度并自行滚动（见 app.css .tab-pane）
     children: (
-      <Space orientation="vertical" size={4} style={{ width: '100%', alignItems: 'stretch' }}>
+      <div className="tab-pane">
         <QueryBuilder fileId={fileId} tab={tab} fields={file.fields ?? []} />
         {tab.searched && tab.total > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '2px 4px' }}>
+          <div className="tab-actions">
             <Button
               size="small"
               icon={<ExportOutlined />}
@@ -108,7 +109,7 @@ function FilePane({ fileId }: { fileId: string }) {
           </div>
         )}
         <LogTable fileId={fileId} tab={tab} />
-      </Space>
+      </div>
     ),
   }))
 
@@ -164,7 +165,7 @@ export default function MainPane() {
 
   // 文件切换在左侧边栏（FileSidebar），右侧只渲染当前文件（含其检索 Tabs）
   return (
-    <Layout.Content className="right-scroll">
+    <Layout.Content className="right-pane">
       {activeFileId ? (
         <FilePane fileId={activeFileId} />
       ) : (

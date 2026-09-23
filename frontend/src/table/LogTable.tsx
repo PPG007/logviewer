@@ -4,7 +4,7 @@
 // 数据经 GetPage 命中跳转取回，分页条含 pageSize 选择器（默认 20，范围 10~100，随 tab 独立）。
 
 import { useState } from 'react'
-import { App, Empty, Modal, Table, Tag, Typography } from 'antd'
+import { App, Empty, Modal, Pagination, Table, Tag, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import ReactJson from '@microlink/react-json-view'
 import dayjs from 'dayjs'
@@ -186,31 +186,36 @@ export default function LogTable({ fileId, tab }: { fileId: string; tab: Tab }) 
 
   return (
     <>
-      <Table<Row>
-        size="middle"
-        className="lv-rows-clickable"
-        rowKey={(r) => String(r.LineNo)}
-        columns={columns}
-        dataSource={tab.rows}
-        loading={tab.loading}
-        rowClassName={rowClass}
-        onRow={(row) => ({ onClick: () => setDetail(row) })}
-        pagination={
-          tab.total > 0
-            ? {
-                current: tab.page,
-                pageSize: tab.pageSize,
-                total: tab.total,
-                showSizeChanger: true,
-                pageSizeOptions: PAGE_SIZE_OPTIONS,
-                showQuickJumper: true,
-                showTotal: (t) => `共 ${t.toLocaleString()} 条`,
-                onChange: (page, size) => load(page, size),
-              }
-            : false
-        }
-        locale={{ emptyText }}
-      />
+      {/* 表格区是右侧唯一的滚动容器（表头吸顶），查询条件/导出/分页器因此固定不动 */}
+      <div className="lv-table-area">
+        <Table<Row>
+          size="middle"
+          className="lv-rows-clickable"
+          rowKey={(r) => String(r.LineNo)}
+          columns={columns}
+          dataSource={tab.rows}
+          loading={tab.loading}
+          rowClassName={rowClass}
+          onRow={(row) => ({ onClick: () => setDetail(row) })}
+          pagination={false}
+          locale={{ emptyText }}
+        />
+      </div>
+      {/* 分页器独立于滚动区，固定在面板底部 */}
+      {tab.total > 0 && (
+        <div className="lv-pager">
+          <Pagination
+            current={tab.page}
+            pageSize={tab.pageSize}
+            total={tab.total}
+            showSizeChanger
+            pageSizeOptions={PAGE_SIZE_OPTIONS}
+            showQuickJumper
+            showTotal={(t) => `共 ${t.toLocaleString()} 条`}
+            onChange={(page, size) => load(page, size)}
+          />
+        </div>
+      )}
       <RowDetailModal row={detail} onClose={() => setDetail(null)} />
     </>
   )
