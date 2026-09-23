@@ -7,6 +7,10 @@ export {
 };
 
 export type {
+    CacheEntryInfo,
+    CacheInfo,
+    Connection,
+    Credential,
     FieldValues,
     FileInfo,
     IndexProgressEvent,
@@ -14,6 +18,8 @@ export type {
     PageResult,
     ParsedLine,
     RecentFile,
+    RemoteEntry,
+    RemoteListing,
     SearchProgressEvent,
     SearchResult
 } from "./models.js";

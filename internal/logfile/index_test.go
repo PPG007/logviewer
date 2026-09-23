@@ -290,3 +290,104 @@ func TestProgressDuringIndex(t *testing.T) {
 		t.Fatalf("TotalLines = %d, want 400000", s.TotalLines())
 	}
 }
+
+// 追加内容后重新加载：应看到新行，且会话 id 不变（前端 tab 与条件得以保留）。
+func TestReloadPicksUpAppendedContent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "grow.log")
+	if err := os.WriteFile(p, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := logfile.Open(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.WaitReady(); err != nil {
+		t.Fatal(err)
+	}
+	id := s.ID
+	if got := s.TotalLines(); got != 2 {
+		t.Fatalf("TotalLines = %d, want 2", got)
+	}
+
+	// 模拟日志被追加
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("c\nd\ne\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	open := func() (logfile.Source, error) { return os.Open(p) }
+	if err := s.Reload(open, nil); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if err := s.WaitReady(); err != nil {
+		t.Fatal(err)
+	}
+	if s.ID != id {
+		t.Fatalf("会话 id 变了：%q → %q", id, s.ID)
+	}
+	if got := s.TotalLines(); got != 5 {
+		t.Fatalf("TotalLines = %d, want 5", got)
+	}
+	if got, want := s.Size(), int64(len("a\nb\nc\nd\ne\n")); got != want {
+		t.Fatalf("Size = %d, want %d", got, want)
+	}
+	lines, err := s.ReadLines(3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(lines, "|") != "d|e" {
+		t.Fatalf("新行未生效：%v", lines)
+	}
+	// 全量顺序读也要看到新内容
+	var n int64
+	if err := s.Scan(func(int64, string) error { n++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("Scan 行数 = %d, want 5", n)
+	}
+}
+
+// 文件被截断（如日志轮转）后重新加载：行数应减少而不是残留旧行。
+func TestReloadAfterTruncate(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "rotated.log")
+	if err := os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := logfile.Open(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.WaitReady(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(p, []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	open := func() (logfile.Source, error) { return os.Open(p) }
+	if err := s.Reload(open, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitReady(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.TotalLines(); got != 1 {
+		t.Fatalf("TotalLines = %d, want 1", got)
+	}
+	lines, err := s.ReadLines(0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || lines[0] != "new" {
+		t.Fatalf("内容 = %v, want [new]", lines)
+	}
+}

@@ -3,6 +3,9 @@
 
 import * as svc from '../bindings/logviewer/internal/service/logservice.js'
 import type {
+  CacheInfo,
+  Connection,
+  Credential,
   FieldInfo,
   FieldValues,
   FileInfo,
@@ -10,6 +13,7 @@ import type {
   PageResult,
   Query,
   RecentFile,
+  RemoteListing,
   SearchResult,
 } from './types'
 
@@ -43,6 +47,10 @@ export const api = {
   },
   async closeFile(fileId: string): Promise<void> {
     await svc.CloseFile(fileId)
+  },
+  /** 强制重新读取并重建索引（文件被追加/轮转后刷新用）；会话 id 不变。 */
+  async reloadFile(fileId: string): Promise<void> {
+    await svc.ReloadFile(fileId)
   },
   async removeTab(fileId: string, tabId: string): Promise<void> {
     await svc.RemoveTab(fileId, tabId)
@@ -87,5 +95,69 @@ export const api = {
   },
   async clearRecentFiles(): Promise<void> {
     await svc.ClearRecentFiles()
+  },
+
+  // ---------------- 远端主机（SSH/SFTP） ----------------
+
+  /** 已保存的远端主机（最近使用在前，含连接状态）。 */
+  async listConnections(): Promise<Connection[]> {
+    return ((await svc.ListConnections()) ?? []) as Connection[]
+  },
+  /** 新增（ID 为 0）或更新一台远端主机；不涉及任何口令。 */
+  async saveConnection(c: Connection): Promise<Connection> {
+    return (await svc.SaveConnection(c)) as Connection
+  },
+  /** 删除主机：断开连接并连带删除其历史文件记录。 */
+  async deleteConnection(id: number): Promise<void> {
+    await svc.DeleteConnection(id)
+  },
+  /**
+   * 连接（已有可用连接时直接复用）。凭据留空表示沿用后端已保存的口令；
+   * 填了则在连接成功后明文保存到本机数据库。
+   */
+  async connectRemote(id: number, cred: Credential): Promise<void> {
+    await svc.ConnectRemote(id, cred)
+  },
+  /** 清除该主机已保存的口令（下次连接需重新输入）。 */
+  async clearConnectionSecret(id: number): Promise<void> {
+    await svc.ClearConnectionSecret(id)
+  },
+  async disconnectRemote(id: number): Promise<void> {
+    await svc.DisconnectRemote(id)
+  },
+  /** 列出远端目录；dir 为空时定位到上次浏览的目录（再退回远端家目录）。 */
+  async listRemoteDir(id: number, dir: string): Promise<RemoteListing> {
+    return (await svc.ListRemoteDir(id, dir)) as RemoteListing
+  },
+  /** 打开远端文件（需先连接）；同名同主机的文件复用现有会话。 */
+  async openRemoteFile(id: number, remotePath: string): Promise<FileInfo> {
+    return (await svc.OpenRemoteFile(id, remotePath)) as FileInfo
+  },
+  /** 打开远端文件对话框（选择私钥文件）；取消返回 null。 */
+  async pickKeyFile(): Promise<string | null> {
+    const p = (await svc.PickKeyFile()) as string
+    return p || null
+  },
+
+  // ---------------- 远端文件本地缓存 ----------------
+
+  /** 缓存总览（开关、目录、上限、占用、条目列表）。 */
+  async getCacheInfo(): Promise<CacheInfo> {
+    return (await svc.GetCacheInfo()) as CacheInfo
+  },
+  /** 全局开关；只影响后续写入与新会话，不打断进行中的读取与索引。 */
+  async setCacheEnabled(enabled: boolean): Promise<void> {
+    await svc.SetCacheEnabled(enabled)
+  },
+  /** 总量上限（字节；0 表示不限制），会立即按新上限逐出。 */
+  async setCacheLimit(limit: number): Promise<void> {
+    await svc.SetCacheLimit(limit)
+  },
+  async clearCache(): Promise<void> {
+    await svc.ClearCache()
+  },
+  /** 删除单条缓存（正在使用中的会被后端跳过）。 */
+  async removeCacheEntry(sourceKey: string): Promise<void> {
+    await svc.RemoveCacheEntry(sourceKey)
   },
 }

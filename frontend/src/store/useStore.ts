@@ -4,7 +4,16 @@
 // 一切 UI 状态从这里读写；数据加载动作以模块函数形式导出，组件只关心 promise 成败。
 
 import { create } from 'zustand'
-import type { FieldInfo, FieldValues, FileInfo, ParsedLine, Query, RecentFile } from '../types'
+import type {
+  CacheInfo,
+  Connection,
+  FieldInfo,
+  FieldValues,
+  FileInfo,
+  ParsedLine,
+  Query,
+  RecentFile,
+} from '../types'
 import { api } from '../api'
 
 /** 每页行数：默认 20，选择器范围 10~100（后端再兜底 [1,500]）。 */
@@ -31,7 +40,13 @@ export interface FileView {
   info: FileInfo
   indexPercent: number
   indexDone: boolean
-  indexError: string // 索引失败信息（成功为空）
+  indexError: string
+  /**
+   * 正在重新加载（文件被追加/轮转后重建索引）。
+   * 重新加载会替换整份行索引，旧的行号随即失效，因此开始时清空各 tab 的缓存结果，
+   * 完成后再按当前条件重跑激活 tab。
+   */
+  reloading?: boolean // 索引失败信息（成功为空）
   fields: FieldInfo[] | null // 未拉取/拉取失败为 null，UI 按 [] 处理
   fieldValues: Record<string, FieldValues> // 字段名 -> 取值枚举（未请求过则缺 key；Truncated 字段不在此）
   tabs: Tab[]
@@ -90,12 +105,18 @@ interface State {
   activeFileId: string | null
   /** 历史记录（SQLite 持久化，重启后仍在）：侧栏「最近打开」数据源。 */
   recent: RecentFile[]
+  /** 已保存的远端主机（SQLite 持久化）：侧栏「远程主机」数据源。 */
+  connections: Connection[]
+  /** 本地缓存总览（远端文件内容缓存）；null = 尚未拉取。 */
+  cacheInfo: CacheInfo | null
   dark: boolean // 暗色主题（持久化；同步 ConfigProvider 与 <html data-theme>）
   toggleTheme: () => void
   addFile: (info: FileInfo) => void
   removeFile: (fileId: string) => void
   setActiveFile: (fileId: string) => void
   setRecent: (recent: RecentFile[]) => void
+  setConnections: (connections: Connection[]) => void
+  setCacheInfo: (info: CacheInfo | null) => void
   setIndexProgress: (
     fileId: string,
     percent: number,
@@ -124,6 +145,8 @@ export const useStore = create<State>()((set, get) => ({
   files: [],
   activeFileId: null,
   recent: [],
+  connections: [],
+  cacheInfo: null,
   dark: readSavedTheme(),
 
   toggleTheme() {
@@ -187,28 +210,59 @@ export const useStore = create<State>()((set, get) => ({
     set({ recent })
   },
 
+  setConnections(connections) {
+    set({ connections })
+  },
+
+  setCacheInfo(cacheInfo) {
+    set({ cacheInfo })
+  },
+
   setIndexProgress(fileId, percent, done, error = '', totalLines) {
+    const prev = findFile(get(), fileId)
+    // 「已就绪 → 又开始索引」只可能是重新加载：整份行索引即将被替换，
+    // 各 tab 缓存的行号随之失效，先清空（否则会拿旧行号去读新索引）。
+    const reloadStarted = !!prev && prev.indexDone && !done
+    const reloadFinished = done && !error && !!prev?.reloading
+
     set((s) => ({
-      files: s.files.map((f) =>
-        f.fileId !== fileId
-          ? f
-          : {
-              ...f,
-              indexPercent: done && !error ? 100 : percent,
-              indexDone: done,
-              indexError: error,
-              // 行数只有在索引扫描结束后才可知：打开接口返回的 FileInfo.TotalLines 恒为 0，
-              // 这里在完成时补正（否则侧栏一直显示「0 行」）。
-              info: done
-                ? {
-                    ...f.info,
-                    Status: error ? 'error' : 'ready',
-                    TotalLines: totalLines && totalLines > 0 ? totalLines : f.info.TotalLines,
-                  }
-                : f.info,
-            },
-      ),
+      files: s.files.map((f) => {
+        if (f.fileId !== fileId) return f
+        return {
+          ...f,
+          indexPercent: done && !error ? 100 : percent,
+          indexDone: done,
+          indexError: error,
+          reloading: reloadStarted ? true : reloadFinished ? false : f.reloading,
+          tabs: reloadStarted
+            ? f.tabs.map((t) => ({
+                ...t,
+                rows: [],
+                total: 0,
+                searched: false,
+                searching: false,
+                searchPercent: 0,
+                loading: false,
+              }))
+            : f.tabs,
+          // 行数只有在索引扫描结束后才可知：打开接口返回的 FileInfo.TotalLines 恒为 0，
+          // 这里在完成时补正（否则侧栏一直显示「0 行」）。
+          info: done
+            ? {
+                ...f.info,
+                Status: error ? 'error' : 'ready',
+                TotalLines: totalLines && totalLines > 0 ? totalLines : f.info.TotalLines,
+              }
+            : f.info,
+        }
+      }),
     }))
+
+    // 重新加载完成：按当前条件重跑激活 tab，让新内容立刻可见
+    if (reloadFinished) {
+      const f = findFile(get(), fileId)
+      if (f) runSearch(fileId, f.activeTabId).catch(() => {})
+    }
   },
 
   setFields(fileId, fields) {
@@ -469,7 +523,11 @@ export async function syncIndex(fileId: string): Promise<void> {
   if (st.Done) {
     cur.setIndexProgress(fileId, st.Error ? 0 : 100, true, st.Error, st.TotalLines)
     if (!st.Error) ensureFields(fileId)
+    return
   }
+  // 未完成：把「正在索引」这一状态也对账过去（文件很小或事件早于订阅时，
+  // 重新加载的开始信号可能整个丢了，否则界面会一直显示旧结果）。
+  cur.setIndexProgress(fileId, st.Percent, false)
 }
 
 // ---------------- 历史记录（SQLite 持久化） ----------------
@@ -482,6 +540,16 @@ export async function refreshRecent(): Promise<void> {
   } catch {
     useStore.getState().setRecent([])
   }
+}
+
+/**
+ * 强制重新读取文件并重建索引（会话 id 不变，tab 保留）。
+ * 用于日志被追加/轮转后手动刷新；若文件未变化，后端不会重复拉取。
+ */
+export async function reloadFile(fileId: string): Promise<void> {
+  await api.reloadFile(fileId)
+  await syncIndex(fileId).catch(() => {}) // 事件推送为主，此调用兜底对账
+  await refreshRecent() // 行数与最近打开时间可能已更新
 }
 
 /** 从历史记录重新打开文件（重建索引）；文件已丢失时抛出（调用方提示并可移除记录）。 */
@@ -502,4 +570,53 @@ export async function removeRecentFile(id: number): Promise<void> {
 export async function clearRecentFiles(): Promise<void> {
   await api.clearRecentFiles()
   useStore.getState().setRecent([])
+}
+
+// ---------------- 远端主机（SSH/SFTP） ----------------
+
+/** 拉取已保存的远端主机并写入 store；失败（数据库不可用等）静默为空列表。 */
+export async function refreshConnections(): Promise<void> {
+  try {
+    useStore.getState().setConnections(await api.listConnections())
+  } catch {
+    useStore.getState().setConnections([])
+  }
+}
+
+/**
+ * 打开远端文件（目录浏览器/历史记录都走这里）。
+ * 返回 FileInfo：Status 为 indexing 表示文件在服务端有变化、已触发重新拉取。
+ */
+export async function openRemoteFile(connId: number, remotePath: string): Promise<FileInfo> {
+  const info = await api.openRemoteFile(connId, remotePath)
+  useStore.getState().addFile(info) // 同一来源已打开时只切过去
+  await syncIndex(info.ID).catch(() => {}) // 事件推送为主，此调用兜底对账
+  await refreshRecent() // 打开次数/最近打开时间有变化
+  await refreshConnections() // 上次浏览目录可能已更新
+  return info
+}
+
+/** 拉取缓存总览；失败静默（缓存只是加速手段，不可用时功能照常）。 */
+export async function refreshCacheInfo(): Promise<void> {
+  try {
+    useStore.getState().setCacheInfo(await api.getCacheInfo())
+  } catch {
+    useStore.getState().setCacheInfo(null)
+  }
+}
+
+/**
+ * 远端文件的缓存标识：与后端 store.Source.Key() 同构。
+ * 前端据此判断某个远端文件是否已有本地缓存（目录浏览器标记、索引提示文案）。
+ */
+export function remoteCacheKey(remote: string, path: string): string {
+  return `sftp://${remote.toLowerCase()}${path}`
+}
+
+/** 删除一台远端主机（后端会连带删除其历史文件记录并关闭相关会话）。 */
+export async function deleteConnection(id: number): Promise<void> {
+  await api.deleteConnection(id)
+  await refreshConnections()
+  await refreshRecent()
+  await refreshCacheInfo() // 后端会连带清理该主机的缓存
 }

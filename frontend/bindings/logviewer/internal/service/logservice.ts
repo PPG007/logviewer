@@ -24,6 +24,20 @@ export function CancelSearch(fileID: string, tabID: string): $CancellablePromise
 }
 
 /**
+ * ClearCache 清空全部缓存。
+ */
+export function ClearCache(): $CancellablePromise<void> {
+    return $Call.ByID(1211325819);
+}
+
+/**
+ * ClearConnectionSecret 清除该主机保存的口令（用户显式要求）。
+ */
+export function ClearConnectionSecret(id: number): $CancellablePromise<void> {
+    return $Call.ByID(2701484247, id);
+}
+
+/**
  * ClearRecentFiles 清空全部历史记录。
  */
 export function ClearRecentFiles(): $CancellablePromise<void> {
@@ -39,11 +53,40 @@ export function CloseFile(fileID: string): $CancellablePromise<void> {
 }
 
 /**
+ * ConnectRemote 连接一台主机。凭据留空表示沿用库里已保存的；填了则在成功后覆盖保存。
+ */
+export function ConnectRemote(id: number, cred: $models.Credential): $CancellablePromise<void> {
+    return $Call.ByID(2076974210, id, cred);
+}
+
+/**
+ * DeleteConnection 删除一台远端主机：断开连接、关闭其上的文件会话，
+ * 并连带删除该主机的历史文件记录（否则「最近打开」会留下打不开的死记录）。
+ */
+export function DeleteConnection(id: number): $CancellablePromise<void> {
+    return $Call.ByID(1714312877, id);
+}
+
+/**
+ * DisconnectRemote 断开连接，并关闭该主机上已打开的文件（断开后它们只会报错）。
+ */
+export function DisconnectRemote(id: number): $CancellablePromise<void> {
+    return $Call.ByID(4151136750, id);
+}
+
+/**
  * ExportMatches 把 tabId 的全部命中原始行写入用户选择的文件（JSONL，逐行原样，行尾统一 \n）。
  * 用户取消返回空路径且无错误。
  */
 export function ExportMatches(fileID: string, tabID: string): $CancellablePromise<string> {
     return $Call.ByID(3437408745, fileID, tabID);
+}
+
+/**
+ * GetCacheInfo 缓存总览（管理界面用）。
+ */
+export function GetCacheInfo(): $CancellablePromise<$models.CacheInfo> {
+    return $Call.ByID(1957883564);
 }
 
 /**
@@ -84,6 +127,13 @@ export function GetPage(fileID: string, tabID: string, page: number, pageSize: n
 }
 
 /**
+ * ListConnections 已保存的远端主机（最近使用在前），含当前连接状态。
+ */
+export function ListConnections(): $CancellablePromise<$models.Connection[] | null> {
+    return $Call.ByID(4024272751);
+}
+
+/**
  * ListRecentFiles 返回历史文件记录（最近打开在前），并探测文件在磁盘上是否仍存在。
  */
 export function ListRecentFiles(): $CancellablePromise<$models.RecentFile[] | null> {
@@ -91,8 +141,17 @@ export function ListRecentFiles(): $CancellablePromise<$models.RecentFile[] | nu
 }
 
 /**
- * OpenFile 打开指定路径文件（展示名 = 文件名）。同一路径已打开时复用现有会话，
- * 避免重复占用索引内存；同名但不同目录的文件是两个独立会话。
+ * ListRemoteDir 列出远端目录；dir 为空时定位到上次浏览的目录，再退回家目录。
+ * 会顺带记录「上次浏览目录」，下次打开浏览器直接定位。
+ */
+export function ListRemoteDir(id: number, dir: string): $CancellablePromise<$models.RemoteListing> {
+    return $Call.ByID(1678169839, id, dir);
+}
+
+/**
+ * OpenFile 打开本地文件（展示名 = 文件名）。同一来源已打开时：文件没变就直接复用
+ * 会话（避免重复占用索引内存），变了则重建索引（日志被追加后不必先关再开）。
+ * 同名但不同目录的文件是两个独立会话。
  */
 export function OpenFile(path: string): $CancellablePromise<$models.FileInfo> {
     return $Call.ByID(4260092432, path);
@@ -106,11 +165,21 @@ export function OpenFileDialog(): $CancellablePromise<$models.FileInfo> {
 }
 
 /**
- * OpenRecentFile 打开历史记录中的文件；文件已不在磁盘时返回明确错误，
+ * OpenRecentFile 打开历史记录中的文件；本地文件已不在磁盘时返回明确错误，
  * 前端据此提示「文件不存在」并给出移除记录的选项。
+ * 
+ * 远端记录需要先连接：未连接时返回提示，由前端引导去连接（口令已保存时连接表单留空即可）。
  */
 export function OpenRecentFile(id: number): $CancellablePromise<$models.FileInfo> {
     return $Call.ByID(2536471051, id);
+}
+
+/**
+ * OpenRemoteFile 打开远端文件（需先连接）。同一来源已打开时：远端文件在服务端
+ * 被追加/轮转后大小或修改时间会变，此时重新拉取并重建索引，而不是沿用旧索引。
+ */
+export function OpenRemoteFile(id: number, remotePath: string): $CancellablePromise<$models.FileInfo> {
+    return $Call.ByID(104620594, id, remotePath);
 }
 
 /**
@@ -119,6 +188,29 @@ export function OpenRecentFile(id: number): $CancellablePromise<$models.FileInfo
  */
 export function OpenTempLog(content: string): $CancellablePromise<$models.FileInfo> {
     return $Call.ByID(2653523862, content);
+}
+
+/**
+ * PickKeyFile 弹出文件选择对话框挑私钥文件；用户取消返回空串。
+ */
+export function PickKeyFile(): $CancellablePromise<string> {
+    return $Call.ByID(467974280);
+}
+
+/**
+ * ReloadFile 强制重新读取并重建索引（不看文件是否变化）。用于日志被追加/轮转后
+ * 手动刷新，或大小与修改时间都没变但内容确实变了的情形。
+ * 会话 id 不变，前端已开的 tab 与检索条件保留，但需要重新检索。
+ */
+export function ReloadFile(fileID: string): $CancellablePromise<void> {
+    return $Call.ByID(1320838789, fileID);
+}
+
+/**
+ * RemoveCacheEntry 删除单条缓存。
+ */
+export function RemoveCacheEntry(sourceKey: string): $CancellablePromise<void> {
+    return $Call.ByID(3771264644, sourceKey);
 }
 
 /**
@@ -137,9 +229,30 @@ export function RemoveTab(fileID: string, tabID: string): $CancellablePromise<vo
 }
 
 /**
+ * SaveConnection 新增（ID 为 0）或更新一台远端主机。
+ */
+export function SaveConnection(c: $models.Connection): $CancellablePromise<$models.Connection> {
+    return $Call.ByID(189468483, c);
+}
+
+/**
  * Search 提交检索（tabID 由前端生成），后台顺序扫描；期间 emit searchProgress。
  * pageSize 决定首屏返回行数；取消时返回 context 取消错误（前端静默处理）。
  */
 export function Search(fileID: string, tabID: string, query: search$0.Query, pageSize: number): $CancellablePromise<$models.SearchResult> {
     return $Call.ByID(3669909110, fileID, tabID, query, pageSize);
+}
+
+/**
+ * SetCacheEnabled 全局开关缓存。只影响后续写入与新会话，不打断进行中的读取与索引。
+ */
+export function SetCacheEnabled(enabled: boolean): $CancellablePromise<void> {
+    return $Call.ByID(3477076029, enabled);
+}
+
+/**
+ * SetCacheLimit 设置缓存总量上限（字节；<=0 表示不限制），并按新上限立即逐出。
+ */
+export function SetCacheLimit(limit: number): $CancellablePromise<void> {
+    return $Call.ByID(1425324751, limit);
 }

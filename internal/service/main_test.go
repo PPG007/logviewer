@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"logviewer/internal/filecache"
 	"logviewer/internal/store"
 )
 
@@ -16,6 +17,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv(store.EnvDBPath, filepath.Join(dir, "test.db"))
+	// 缓存目录同样指向临时目录：否则服务层测试会把远端内容的缓存写进真实的
+	// %LocalAppData%\logviewer\cache，既污染用户环境又让用例互相干扰。
+	os.Setenv(filecache.EnvCacheDir, filepath.Join(dir, "cache"))
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

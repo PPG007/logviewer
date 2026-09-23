@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,9 +19,11 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"logviewer/internal/filecache"
 	"logviewer/internal/logfile"
 	"logviewer/internal/parse"
 	"logviewer/internal/search"
+	"logviewer/internal/sshconn"
 	"logviewer/internal/store"
 )
 
@@ -32,6 +35,9 @@ type FileInfo struct {
 	Name       string
 	Status     string // "indexing" | "ready" | "error"
 	TotalLines int64
+	Kind       string // "local" | "remote"
+	Remote     string // 远端连接标识 user@host:port（本地为空）
+	ConnID     uint   // 远端连接 id（本地为 0）
 }
 
 type IndexStatus struct {
@@ -44,7 +50,8 @@ type IndexStatus struct {
 	TotalLines int64
 }
 
-// RecentFile 历史记录项（侧栏「最近打开」列表）。同名不同路径的文件靠 Path/Dir 区分。
+// RecentFile 历史记录项（侧栏「最近打开」列表）。
+// 同名不同路径靠 Path/Dir 区分，同名不同主机再靠 Remote 区分。
 type RecentFile struct {
 	ID           uint
 	Path         string
@@ -52,8 +59,14 @@ type RecentFile struct {
 	Dir          string
 	TotalLines   int64 // 最近一次索引完成后的行数（未知为 0）
 	OpenCount    int
-	LastOpenedAt int64 // unix 毫秒
-	Exists       bool  // 记录读取时磁盘上是否仍存在；false = 已丢失，UI 标记并可移除记录
+	LastOpenedAt int64  // unix 毫秒
+	Exists       bool   // 记录读取时磁盘上是否仍存在；false = 已丢失，UI 标记并可移除记录
+	Kind         string // "local" | "remote"
+	Remote       string // 远端连接标识 user@host:port
+	ConnID       uint   // 远端连接 id（重连用）
+	// Connected 远端主机当前是否有活动连接。远端文件的存在性不在列表阶段探测
+	// （列表不能因网络卡住），未连接时 UI 显示「未连接」而不是「已丢失」。
+	Connected bool
 }
 
 // FieldValues 某字段探测到的取值枚举（供检索条件下拉，仅 string 类型字段有）。
@@ -188,6 +201,7 @@ func (v *valSet) list() []string {
 type LogService struct {
 	mu          sync.Mutex
 	sessions    map[string]*logfile.FileSession // fileID -> 会话
+	sources     map[string]store.Source         // fileID -> 来源（去重、历史记录、重新打开都靠它）
 	fields      map[string]map[string]string    // fileID -> 字段名 -> 类型
 	fieldValues map[string]map[string]*valSet   // fileID -> 字段名 -> string 取值收集器
 	fileTabs    map[string]map[string]struct{}  // fileID -> 该文件注册过的 tabID（CloseFile 时清理）
@@ -197,11 +211,20 @@ type LogService struct {
 	// store 历史文件记录库（SQLite）。打开失败时为 nil，功能整体降级为「无历史记录」，
 	// 不影响打开/检索等主流程。
 	store *store.Store
+	// remote 远端 SSH/SFTP 连接管理器。数据库不可用时为 nil（远端功能整体不可用）。
+	remote *sshconn.Manager
+	// cache 远端文件内容的本地缓存。日志查看器的常态是反复看同一份日志，
+	// 缓存命中时重开与翻页都不再走网络；数据库不可用时为 nil（降级为不缓存）。
+	cache *filecache.Manager
+	// cacheEnabled 全局缓存开关（主机可单独覆盖）；见 cache.go。
+	cfgMu        sync.RWMutex
+	cacheEnabled bool
 }
 
 func NewLogService() *LogService {
 	s := &LogService{
 		sessions:    make(map[string]*logfile.FileSession),
+		sources:     make(map[string]store.Source),
 		fields:      make(map[string]map[string]string),
 		fieldValues: make(map[string]map[string]*valSet),
 		fileTabs:    make(map[string]map[string]struct{}),
@@ -215,11 +238,29 @@ func NewLogService() *LogService {
 	} else {
 		s.store = db
 	}
+	// 主机指纹记录放在配置目录：与数据库同级，便于随配置一起备份/清理。
+	// 同时复用 ~/.ssh/known_hosts（只读），让已经信任过的主机免于二次确认。
+	if dir, err := store.ConfigDir(); err != nil {
+		log.Printf("远端功能不可用（无法确定配置目录）：%v", err)
+	} else if m, err := sshconn.NewManager(sshconn.Options{
+		KnownHostsPath:      filepath.Join(dir, "known_hosts"),
+		ReuseUserKnownHosts: true,
+	}); err != nil {
+		log.Printf("远端功能不可用（初始化连接管理器失败）：%v", err)
+	} else {
+		s.remote = m
+	}
+	// 缓存默认开启；初始化失败只是不缓存，远端功能照常可用。
+	s.cacheEnabled = true
+	s.initCache()
 	return s
 }
 
-// ServiceShutdown 由 Wails 在退出时调用：关闭数据库连接（记录已逐条提交，此处仅释放句柄）。
+// ServiceShutdown 由 Wails 在退出时调用：关闭远端连接与数据库连接。
 func (s *LogService) ServiceShutdown() error {
+	if s.remote != nil {
+		s.remote.Close()
+	}
 	if s.store == nil {
 		return nil
 	}
@@ -262,10 +303,10 @@ func (s *LogService) OpenFileDialog() (FileInfo, error) {
 	return s.OpenFile(path)
 }
 
-// openSession 打开日志路径并注册会话：同一次顺序扫描里完成索引、字段收集与
-// 取值收集（枚举下拉数据），立即返回。displayName 非空时覆盖展示名
-// （临时日志显示为「临时日志 …」）；persist=false 表示临时日志，不进历史记录。
-func (s *LogService) openSession(path, displayName string, persist bool) (FileInfo, error) {
+// newCollectors 字段/取值收集器：复用建索引的同一次顺序扫描顺带收集
+// （字段名 + string 字段的枚举取值），避免为下拉数据多扫一遍文件。
+// 返回的收集器只应由当轮扫描的 goroutine 写入；读取方须先等 WaitReady。
+func newCollectors() (map[string]string, map[string]*valSet, logfile.LineFunc) {
 	acc := make(map[string]string)
 	vals := make(map[string]*valSet)
 	onLine := func(_ int64, raw string) {
@@ -285,55 +326,176 @@ func (s *LogService) openSession(path, displayName string, persist bool) (FileIn
 			}
 		}
 	}
-	sess, err := logfile.Open(path, onLine)
+	return acc, vals, onLine
+}
+
+// openSession 打开来源并注册会话：同一次顺序扫描里完成索引、字段收集与
+// 取值收集（枚举下拉数据），立即返回。displayName 非空时覆盖展示名
+// （临时日志显示为「临时日志 …」）；persist=false 表示临时日志，不进历史记录。
+// open 负责提供字节来源（本地文件或远端 SFTP 文件），由调用方决定怎么连。
+func (s *LogService) openSession(
+	src store.Source, displayName string, persist bool, open func() (logfile.Source, error),
+) (FileInfo, error) {
+	acc, vals, onLine := newCollectors()
+	raw, err := open()
 	if err != nil {
 		return FileInfo{}, err
 	}
+	name := src.Name()
 	if displayName != "" {
-		sess.Name = displayName // 仅展示用途；Name 在 FileSession 中不被索引路径读取
+		name = displayName // 仅展示用途；Name 在 FileSession 中不被索引路径读取
 	}
-	info := toFileInfo(sess)
+	sess, err := logfile.OpenSource(raw, src.DisplayPath(), name, onLine)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	info := toFileInfo(sess, src)
 	s.mu.Lock()
 	s.sessions[sess.ID] = sess
+	s.sources[sess.ID] = src
 	s.fields[sess.ID] = acc
 	s.fieldValues[sess.ID] = vals
 	s.mu.Unlock()
 	if persist {
 		// 记录文件名/路径/大小/修改时间等：重启后可在「最近打开」里找到（同名不同路径各记一条）。
-		s.recordOpen(sess)
-		s.recordTotalLines(sess)
+		s.recordOpen(src, sess)
+		s.recordTotalLines(src, sess)
 	}
 	// 进度通过心跳事件推送（fileID 此时才可用，避免回调闭包时序问题）。
 	s.watchIndex(sess.ID, sess)
 	return info, nil
 }
 
-// OpenFile 打开指定路径文件（展示名 = 文件名）。同一路径已打开时复用现有会话，
-// 避免重复占用索引内存；同名但不同目录的文件是两个独立会话。
+// OpenFile 打开本地文件（展示名 = 文件名）。同一来源已打开时：文件没变就直接复用
+// 会话（避免重复占用索引内存），变了则重建索引（日志被追加后不必先关再开）。
+// 同名但不同目录的文件是两个独立会话。
 func (s *LogService) OpenFile(path string) (FileInfo, error) {
-	if info, ok := s.findOpenByPath(path); ok {
-		// 复用会话也算一次打开：刷新打开次数与「最近打开」时间。
-		if sess := s.get(info.ID); sess != nil {
-			s.recordOpen(sess)
+	src := store.LocalSource(path)
+	stat := func() (os.FileInfo, error) { return os.Stat(path) }
+	open := func() (logfile.Source, error) { return os.Open(path) }
+	if info, ok := s.findOpen(src); ok {
+		sess := s.get(info.ID)
+		if sess == nil {
+			return FileInfo{}, fmt.Errorf("file not found: %s", info.ID)
 		}
+		info, err := s.reuseOrReload(sess, src, stat, open)
+		if err != nil {
+			return FileInfo{}, err
+		}
+		s.recordOpen(src, sess) // 复用会话也算一次打开
 		return info, nil
 	}
-	return s.openSession(path, "", true)
+	return s.openSession(src, "", true, open)
+}
+
+// reuseOrReload 处理「打开的是一份已经在列表里的文件」：
+// 来源侧的大小与修改时间都没变就直接复用现有会话；变了就丢弃旧索引重新读取。
+// 重新加载保持会话 id 不变，前端已开的 tab 与检索条件因此得以保留。
+//
+// 比对只查元信息（stat），不预开来源：开了就要在 Reload 之前关掉，
+// 否则新旧两份额来源重叠会踩到缓存的「同一来源一个写入者」限制。
+func (s *LogService) reuseOrReload(
+	sess *logfile.FileSession,
+	src store.Source,
+	stat func() (os.FileInfo, error),
+	open func() (logfile.Source, error),
+) (FileInfo, error) {
+	fi, err := stat()
+	if err != nil {
+		return FileInfo{}, err
+	}
+	if fi.Size() == sess.Size() && fi.ModTime().Equal(sess.ModTime()) {
+		return toFileInfo(sess, src), nil // 内容没变：不做无谓的重新拉取（远端可能是上百 MB）
+	}
+
+	acc, vals, onLine := newCollectors()
+	if err := sess.Reload(open, onLine); err != nil {
+		return FileInfo{}, err
+	}
+	s.mu.Lock()
+	s.fields[sess.ID] = acc
+	s.fieldValues[sess.ID] = vals
+	s.mu.Unlock()
+	s.recordTotalLines(src, sess)
+	s.watchIndex(sess.ID, sess)
+	// 立刻通知前端「重新开始索引」：文件很小时本轮可能在首次心跳前就结束，
+	// 单靠事件里的 done=true 无法让前端区分「重新加载」与「本来就好」。
+	emit("indexProgress", IndexProgressEvent{FileID: sess.ID, Percent: 0, Done: false})
+	return toFileInfo(sess, src), nil
+}
+
+// ReloadFile 强制重新读取并重建索引（不看文件是否变化）。用于日志被追加/轮转后
+// 手动刷新，或大小与修改时间都没变但内容确实变了的情形。
+// 会话 id 不变，前端已开的 tab 与检索条件保留，但需要重新检索。
+func (s *LogService) ReloadFile(fileID string) error {
+	sess := s.get(fileID)
+	if sess == nil {
+		return fmt.Errorf("file not found: %s", fileID)
+	}
+	s.mu.Lock()
+	src := s.sources[fileID]
+	s.mu.Unlock()
+
+	// 强制刷新必须绕过缓存，并用新内容重写它：
+	// 用户点这个按钮，恰恰是因为「大小与修改时间都没变但内容确实变了」。
+	_, open, err := s.accessorsFor(src, true)
+	if err != nil {
+		return err
+	}
+	acc, vals, onLine := newCollectors()
+	if err := sess.Reload(open, onLine); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.fields[fileID] = acc
+	s.fieldValues[fileID] = vals
+	s.mu.Unlock()
+	s.recordTotalLines(src, sess)
+	s.watchIndex(fileID, sess)
+	emit("indexProgress", IndexProgressEvent{FileID: fileID, Percent: 0, Done: false})
+	return nil
+}
+
+// accessorsFor 按来源给出「查元信息」与「打开字节来源」两个闭包。
+// 分成两个是为了让「比对文件是否变化」只查元信息，不必先开一份来源再关掉。
+// bypash 供「重新加载」使用：绕过缓存直连远端，并用新内容重写缓存。
+func (s *LogService) accessorsFor(
+	src store.Source, bypass bool,
+) (func() (os.FileInfo, error), func() (logfile.Source, error), error) {
+	if src.Kind != store.KindRemote {
+		// 缓存只服务远端：本地文件本身就在磁盘上，再复制一份毫无意义，
+		// 而且一旦本地文件「同大小同 mtime 被改写」，缓存会把本地内容也钉成旧值。
+		return func() (os.FileInfo, error) { return os.Stat(src.Path) },
+			func() (logfile.Source, error) { return os.Open(src.Path) }, nil
+	}
+	if s.remote == nil {
+		return nil, nil, errNoRemote()
+	}
+	rec, err := s.store.GetConnection(src.ConnID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("主机不存在：%w", err)
+	}
+	prof := profile(rec)
+	if !s.remote.Connected(prof) {
+		return nil, nil, fmt.Errorf("需要先连接 %s 才能重新加载", prof.Display())
+	}
+	return func() (os.FileInfo, error) { return s.remote.Stat(prof, src.Path) },
+		func() (logfile.Source, error) { return s.openRemoteSource(rec, prof, src.Path, bypass) }, nil
 }
 
 // recordOpen 写一条历史记录（打开次数 +1、刷新最近打开时间）。失败只记日志，
 // 不影响打开主流程；store 不可用（数据库打开失败）时整体降级为空操作。
-func (s *LogService) recordOpen(sess *logfile.FileSession) {
+func (s *LogService) recordOpen(src store.Source, sess *logfile.FileSession) {
 	if s.store == nil {
 		return
 	}
-	if err := s.store.Touch(sess.Path, sess.Size(), sess.ModTime().Unix()); err != nil {
+	if err := s.store.Touch(src, sess.Size(), sess.ModTime().Unix()); err != nil {
 		log.Printf("写入历史记录失败：%v", err)
 	}
 }
 
 // recordTotalLines 等索引结束后把总行数回写历史记录（行数只有索引完成时才可知）。
-func (s *LogService) recordTotalLines(sess *logfile.FileSession) {
+func (s *LogService) recordTotalLines(src store.Source, sess *logfile.FileSession) {
 	if s.store == nil {
 		return
 	}
@@ -341,35 +503,23 @@ func (s *LogService) recordTotalLines(sess *logfile.FileSession) {
 		if err := sess.WaitReady(); err != nil {
 			return // 索引失败：不写行数
 		}
-		if err := s.store.SetTotalLines(sess.Path, sess.TotalLines()); err != nil {
+		if err := s.store.SetTotalLines(src, sess.TotalLines()); err != nil {
 			log.Printf("写入历史记录行数失败：%v", err)
 		}
 	}()
 }
 
-// findOpenByPath 按归一化路径查找已打开的会话（Windows 下忽略大小写）。
-func (s *LogService) findOpenByPath(path string) (FileInfo, bool) {
-	key, err := pathKey(path)
-	if err != nil {
-		return FileInfo{}, false
-	}
+// findOpen 按来源键查找已打开的会话（本地忽略大小写，远端含主机维度）。
+func (s *LogService) findOpen(src store.Source) (FileInfo, bool) {
+	key := src.Key()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, sess := range s.sessions {
-		if k, err := pathKey(sess.Path); err == nil && k == key {
-			return toFileInfo(sess), true
+	for id, sess := range s.sessions {
+		if s.sources[id].Key() == key {
+			return toFileInfo(sess, s.sources[id]), true
 		}
 	}
 	return FileInfo{}, false
-}
-
-// pathKey 归一化路径（绝对路径 + 平台大小写规则），用于同一文件的判定。
-func pathKey(path string) (string, error) {
-	abs, err := store.Normalize(path)
-	if err != nil {
-		return "", err
-	}
-	return store.PathKey(abs), nil
 }
 
 // OpenTempLog 创建临时日志：内容写入系统临时目录后走与普通文件一致的解析/索引流程。
@@ -398,7 +548,12 @@ func (s *LogService) OpenTempLog(content string) (FileInfo, error) {
 		os.Remove(path)
 		return FileInfo{}, fmt.Errorf("写入临时文件失败：%w", err)
 	}
-	info, err := s.openSession(path, fmt.Sprintf("临时日志 %s", time.Now().Format("15:04:05")), false)
+	info, err := s.openSession(
+		store.LocalSource(path),
+		fmt.Sprintf("临时日志 %s", time.Now().Format("15:04:05")),
+		false,
+		func() (logfile.Source, error) { return os.Open(path) },
+	)
 	if err != nil {
 		os.Remove(path) // 打开失败不留垃圾文件
 		return FileInfo{}, err
@@ -440,6 +595,7 @@ func (s *LogService) CloseFile(fileID string) error {
 	s.mu.Lock()
 	sess := s.sessions[fileID]
 	delete(s.sessions, fileID)
+	delete(s.sources, fileID)
 	delete(s.fields, fileID)
 	delete(s.fieldValues, fileID)
 	tabs := s.fileTabs[fileID]
@@ -484,8 +640,15 @@ func (s *LogService) ListRecentFiles() ([]RecentFile, error) {
 		return nil, err
 	}
 	out := make([]RecentFile, 0, len(recs))
-	paths := make([]string, 0, len(recs))
+	// 只探测本地路径：远端记录若逐条连网 stat，侧栏会被网络拖住。
+	// 远端的存在性留到用户点击时（连接后 stat）判定，未连接时 UI 显示「未连接」。
+	localIdx := make([]int, 0, len(recs))
+	localPaths := make([]string, 0, len(recs))
 	for _, r := range recs {
+		kind := r.Kind
+		if kind == "" {
+			kind = store.KindLocal // 兼容早期版本写入的记录（无 kind 列）
+		}
 		out = append(out, RecentFile{
 			ID:           r.ID,
 			Path:         r.Path,
@@ -495,17 +658,26 @@ func (s *LogService) ListRecentFiles() ([]RecentFile, error) {
 			OpenCount:    r.OpenCount,
 			LastOpenedAt: r.LastOpenedAt.UnixMilli(),
 			Exists:       true, // 先按「存在」乐观置位，探测超时/失败不误报已丢失
+			Kind:         kind,
+			Remote:       r.Remote,
+			ConnID:       r.ConnID,
+			Connected:    kind == store.KindRemote && s.remote != nil && s.remote.ConnectedKey(r.Remote),
 		})
-		paths = append(paths, r.Path)
+		if kind == store.KindLocal {
+			localIdx = append(localIdx, len(out)-1)
+			localPaths = append(localPaths, r.Path)
+		}
 	}
-	for i, missing := range probeExists(paths) {
-		out[i].Exists = !missing
+	for i, missing := range probeExists(localPaths) {
+		out[localIdx[i]].Exists = !missing
 	}
 	return out, nil
 }
 
-// OpenRecentFile 打开历史记录中的文件；文件已不在磁盘时返回明确错误，
+// OpenRecentFile 打开历史记录中的文件；本地文件已不在磁盘时返回明确错误，
 // 前端据此提示「文件不存在」并给出移除记录的选项。
+//
+// 远端记录需要先连接：未连接时返回提示，由前端引导去连接（口令已保存时连接表单留空即可）。
 func (s *LogService) OpenRecentFile(id uint) (FileInfo, error) {
 	if s.store == nil {
 		return FileInfo{}, errNoHistory()
@@ -513,6 +685,15 @@ func (s *LogService) OpenRecentFile(id uint) (FileInfo, error) {
 	rec, err := s.store.Get(id)
 	if err != nil {
 		return FileInfo{}, fmt.Errorf("历史记录不存在：%w", err)
+	}
+	if rec.Kind == store.KindRemote {
+		if s.remote == nil {
+			return FileInfo{}, errNoRemote()
+		}
+		if !s.remote.ConnectedKey(rec.Remote) {
+			return FileInfo{}, fmt.Errorf("需要先连接 %s 才能打开该文件", rec.Remote)
+		}
+		return s.OpenRemoteFile(rec.ConnID, rec.Path)
 	}
 	if _, err := os.Stat(rec.Path); err != nil {
 		if missingFile(err) {
@@ -800,8 +981,40 @@ func exportHits(w io.Writer, sess *logfile.FileSession, hits []int64) error {
 }
 
 // toParsedLines 命中行号 -> ParsedLine 列表。
+//
+// 命中行号通常密集（同一页里相邻），因此合并成一次连续读取：
+// 远端来源上逐行读是每行一次网络往返，一页 20 行就是 20 次。
+// 跨度过大时（散落的命中）退回逐行，避免为几个行号拉一大段。
 func (s *LogService) toParsedLines(sess *logfile.FileSession, lineNos []int64) ([]ParsedLine, error) {
 	rows := make([]ParsedLine, 0, len(lineNos))
+	if len(lineNos) == 0 {
+		return rows, nil
+	}
+	lo, hi := lineNos[0], lineNos[0]
+	for _, no := range lineNos {
+		if no < lo {
+			lo = no
+		}
+		if no > hi {
+			hi = no
+		}
+	}
+	const maxSpan = 4096 // 跨度超过这个行数就不值得为少数命中整段拉取
+	if hi-lo <= maxSpan {
+		raws, err := sess.ReadLines(lo, hi-lo+1)
+		if err != nil {
+			return nil, err
+		}
+		for _, no := range lineNos {
+			idx := no - lo
+			if idx < 0 || int(idx) >= len(raws) {
+				continue
+			}
+			rows = append(rows, buildParsedLine(no, raws[idx]))
+		}
+		return rows, nil
+	}
+
 	for _, no := range lineNos {
 		raws, err := sess.ReadLines(no, 1)
 		if err != nil {
@@ -829,12 +1042,15 @@ func buildParsedLine(lineNo int64, raw string) ParsedLine {
 	return pl
 }
 
-func toFileInfo(sess *logfile.FileSession) FileInfo {
+func toFileInfo(sess *logfile.FileSession, src store.Source) FileInfo {
 	return FileInfo{
 		ID:         sess.ID,
 		Path:       sess.Path,
 		Name:       sess.Name,
 		Status:     sess.Status().String(),
 		TotalLines: sess.TotalLines(),
+		Kind:       src.Kind,
+		Remote:     src.Remote,
+		ConnID:     src.ConnID,
 	}
 }

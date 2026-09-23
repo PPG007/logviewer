@@ -2,23 +2,52 @@
 // 文件（含其内检索级 Tabs）；空状态：未打开文件时提示，索引中显示进度。
 
 import { useEffect, useState } from 'react'
-import { Alert, App, Button, Empty, Layout, Progress, Space, Tabs, Typography } from 'antd'
-import { ExportOutlined, LoadingOutlined } from '@ant-design/icons'
+import { Alert, App, Button, Empty, Layout, Progress, Space, Tabs, Tooltip, Typography } from 'antd'
+import { ExportOutlined, LoadingOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api, errText } from '../api'
-import { findFile, runSearch, useStore, type FileView } from '../store/useStore'
+import { findFile, reloadFile, remoteCacheKey, runSearch, useStore, type FileView } from '../store/useStore'
 import LogTable from '../table/LogTable'
 import QueryBuilder from '../search/QueryBuilder'
 import { openViaDialog } from './openFile'
 
 function IndexingPane({ file }: { file: FileView }) {
+  const remote = file.info.Kind === 'remote'
+  // 命中本地缓存时不必再走网络：提示里说清楚，免得用户以为又要等一遍传输
+  const cacheInfo = useStore((s) => s.cacheInfo)
+  const cached =
+    remote &&
+    (cacheInfo?.Entries ?? []).some(
+      (e) => e.SourceKey === remoteCacheKey(file.info.Remote, file.info.Path),
+    )
   return (
     <div className="main-center">
       <Space orientation="vertical" size={16} align="center">
         <Progress type="circle" percent={Math.floor(file.indexPercent)} status="active" size={120} />
-        <Typography.Text type="secondary">
-          正在建立行索引
-          {file.indexPercent > 0 ? `（${Math.floor(file.indexPercent)}%）` : ''}，大文件首次打开需要几秒，
-          完成后即可浏览与检索
+        <Typography.Text type="secondary" style={{ textAlign: 'center' }}>
+          {file.reloading ? (
+            <>
+              文件已变化，正在重新加载
+              {file.indexPercent > 0 ? `（${Math.floor(file.indexPercent)}%）` : ''}
+              ，完成后会按当前条件重新检索
+            </>
+          ) : cached ? (
+            <>
+              正在从本地缓存重建索引
+              {file.indexPercent > 0 ? `（${Math.floor(file.indexPercent)}%）` : ''}，不走网络
+            </>
+          ) : remote ? (
+            <>
+              正在从 {file.info.Remote} 读取并缓存到本机
+              {file.indexPercent > 0 ? `（${Math.floor(file.indexPercent)}%）` : ''}，
+              首次打开需要完整读一遍（传输时间取决于链路带宽），之后打开与翻页直接读本地缓存
+            </>
+          ) : (
+            <>
+              正在建立行索引
+              {file.indexPercent > 0 ? `（${Math.floor(file.indexPercent)}%）` : ''}
+              ，大文件首次打开需要几秒，完成后即可浏览与检索
+            </>
+          )}
         </Typography.Text>
       </Space>
     </div>
@@ -48,6 +77,7 @@ function FilePane({ fileId }: { fileId: string }) {
   const { message } = App.useApp()
   const file = useStore((s) => findFile(s, fileId))
   const [exportingTab, setExportingTab] = useState<string | null>(null)
+  const [reloading, setReloading] = useState(false)
 
   // 初始「全部」tab：索引就绪后自动跑一次空条件检索（全部行）。
   // autoRun 在触发前即被消费，取消/失败都不会造成自动重跑循环。
@@ -67,6 +97,19 @@ function FilePane({ fileId }: { fileId: string }) {
 
   if (file.indexError) return <ErrorPane file={file} />
   if (!file.indexDone) return <IndexingPane file={file} />
+
+  // 重新加载：文件被追加/轮转后重建索引（后缀加 loading 由后端进度驱动）
+  const handleReload = async () => {
+    setReloading(true)
+    try {
+      await reloadFile(fileId)
+      message.success('已重新加载')
+    } catch (e) {
+      message.error(`重新加载失败：${errText(e)}`)
+    } finally {
+      setReloading(false)
+    }
+  }
 
   // 导出该 tab 的全部命中（后端 SaveFile 对话框 + 逐段流式写出）
   const handleExport = async (tab: FileView['tabs'][number]) => {
@@ -96,8 +139,19 @@ function FilePane({ fileId }: { fileId: string }) {
     children: (
       <div className="tab-pane">
         <QueryBuilder fileId={fileId} tab={tab} fields={file.fields ?? []} />
-        {tab.searched && tab.total > 0 && (
-          <div className="tab-actions">
+        <div className="tab-actions">
+          {/* 日志被追加/轮转后重新读取：会话与检索条件保留，完成后自动重跑当前 tab */}
+          <Tooltip title="重新读取该文件并重建索引（日志被追加或轮转后用）">
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={reloading}
+              onClick={handleReload}
+            >
+              重新加载
+            </Button>
+          </Tooltip>
+          {tab.searched && tab.total > 0 && (
             <Button
               size="small"
               icon={<ExportOutlined />}
@@ -106,8 +160,8 @@ function FilePane({ fileId }: { fileId: string }) {
             >
               导出全部命中（{tab.total.toLocaleString()} 条）
             </Button>
-          </div>
-        )}
+          )}
+        </div>
         <LogTable fileId={fileId} tab={tab} />
       </div>
     ),

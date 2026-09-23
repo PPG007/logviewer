@@ -13,6 +13,8 @@
 | M6 | [06-m6-open-display](./06-m6-open-display.md) | 打开文件 + 分页展示 | M5、M4 | 未开始 |
 | M7 | [07-m7-search-tabs](./07-m7-search-tabs.md) | 检索 tab | M6、M4 | 未开始 |
 | M8 | [08-m8-polish-bench](./08-m8-polish-bench.md) | 打磨 + 压测 | M7 | 未开始 |
+| M9 | [09-m9-remote-sftp](./09-m9-remote-sftp.md) | 远端日志直连（SSH/SFTP） | M8 | 已完成 |
+| M10 | [10-m10-remote-cache](./10-m10-remote-cache.md) | 远端文件本地内容缓存 | M9 | 已完成 |
 
 ## 关联
 

@@ -9,15 +9,18 @@ import '../bindings/github.com/wailsapp/wails/v3/internal/eventcreate.js'
 import './app.css'
 import App from './App'
 import { installEvents } from './events'
-import { refreshRecent, useStore } from './store/useStore'
+import { refreshCacheInfo, refreshConnections, refreshRecent, useStore } from './store/useStore'
 
 dayjs.locale('zh-cn')
 
 // 订阅后端进度事件（模块级注册一次）
 installEvents()
 
-// 启动即拉取历史文件记录（SQLite 持久化）：侧栏「最近打开」在重启后仍可见
+// 启动即拉取历史文件记录与远端主机（SQLite 持久化）：侧栏在重启后仍可见。
+// 注意：只恢复「列表」，不自动重开文件——远端重开需要用户重新输入口令。
 refreshRecent().catch(() => {})
+refreshConnections().catch(() => {})
+refreshCacheInfo().catch(() => {})
 
 // 主题入口：dark 状态驱动 ConfigProvider algorithm（antd 组件配色），
 // 并同步 <html data-theme>（自写 CSS 变量，见 app.css）。useLayoutEffect 确保
