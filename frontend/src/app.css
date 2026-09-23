@@ -255,9 +255,13 @@ body,
   flex-direction: column;
 }
 
+/* antd 6 起 .ant-tabs-content 即「单个页签面板」（不再是包裹容器），非激活面板由
+   .ant-tabs-content-hidden{display:none} 隐藏。第三条必须排除它：否则本规则选择器
+   权重（3 个类）高于 antd 的（1 个类），会把隐藏面板重新显示出来，多个 tab 就在
+   同一页上下堆叠。排除后只有激活面板撑满并竖向排列 —— 一个 tab 一页。 */
 .search-tabs.ant-tabs > .ant-tabs-body-holder,
 .search-tabs.ant-tabs > .ant-tabs-body-holder > .ant-tabs-body,
-.search-tabs.ant-tabs .ant-tabs-content {
+.search-tabs.ant-tabs .ant-tabs-content:not(.ant-tabs-content-hidden) {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
